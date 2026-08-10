@@ -19,6 +19,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
@@ -26,6 +27,51 @@ logger = logging.getLogger(__name__)
 
 NOME_DO_ARQUIVO: Final = "manifesto.json"
 _BLOCO: Final = 1024 * 1024
+
+
+class ModoDeVerificacao(StrEnum):
+    """Quanto esforço gastar para decidir se o artefato em disco ainda serve."""
+
+    RAPIDA = "rapida"
+    """Compara apenas metadado. Não lê o conteúdo do disco."""
+
+    COMPLETA = "completa"
+    """Recalcula o SHA-256. Detecta corrupção que não muda o tamanho."""
+
+
+def escrever_json_atomico(caminho: Path, conteudo: dict[str, Any]) -> Path:
+    """Escreve num temporário, força ao disco e renomeia.
+
+    Sem o fsync, o rename pode alcançar o disco antes do conteúdo, e uma queda de
+    energia deixaria exatamente o arquivo vazio que a escrita atômica existe para
+    impedir.
+    """
+    temporario = caminho.with_name(f"{caminho.name}.novo")
+    with temporario.open("w", encoding="utf-8") as saida:
+        json.dump(conteudo, saida, ensure_ascii=False, indent=2)
+        saida.write("\n")
+        saida.flush()
+        os.fsync(saida.fileno())
+    temporario.replace(caminho)
+    return caminho
+
+
+def ler_json(caminho: Path) -> dict[str, Any] | None:
+    """Lê um manifesto, devolvendo `None` quando ausente ou ilegível.
+
+    Cache ilegível deve custar retrabalho, não travar o pipeline.
+    """
+    if not caminho.exists():
+        return None
+    try:
+        dados: dict[str, Any] = json.loads(caminho.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as erro:
+        logger.warning(
+            "manifesto ilegível foi descartado; o trabalho será refeito",
+            extra={"caminho": str(caminho), "causa": str(erro)},
+        )
+        return None
+    return dados
 
 
 @dataclass(frozen=True)
@@ -88,18 +134,18 @@ def carregar(destino: Path, competencia: str) -> Manifesto:
     travado por causa de um arquivo de cache.
     """
     caminho = caminho_do_manifesto(destino)
-    if not caminho.exists():
+    dados = ler_json(caminho)
+    if dados is None:
         return Manifesto(competencia=competencia)
 
     try:
-        dados = json.loads(caminho.read_text(encoding="utf-8"))
-        arquivos = dados["arquivos"]
         entradas = {
-            nome: EntradaDoManifesto(nome=nome, **campos) for nome, campos in arquivos.items()
+            nome: EntradaDoManifesto(nome=nome, **campos)
+            for nome, campos in dados["arquivos"].items()
         }
-    except (json.JSONDecodeError, KeyError, TypeError) as erro:
+    except (KeyError, TypeError) as erro:
         logger.warning(
-            "manifesto ilegível foi descartado; a competência será rebaixada",
+            "manifesto com formato inesperado foi descartado; a competência será rebaixada",
             extra={"caminho": str(caminho), "causa": str(erro)},
         )
         return Manifesto(competencia=competencia)
@@ -109,9 +155,6 @@ def carregar(destino: Path, competencia: str) -> Manifesto:
 
 def gravar(manifesto: Manifesto, destino: Path) -> Path:
     """Grava o manifesto de forma atômica."""
-    caminho = caminho_do_manifesto(destino)
-    temporario = caminho.with_name(f"{NOME_DO_ARQUIVO}.novo")
-
     conteudo: dict[str, Any] = {
         "competencia": manifesto.competencia,
         "gerado_em": datetime.now(tz=UTC).isoformat(timespec="seconds"),
@@ -126,15 +169,4 @@ def gravar(manifesto: Manifesto, destino: Path) -> Path:
             for nome, entrada in sorted(manifesto.entradas.items())
         },
     }
-
-    with temporario.open("w", encoding="utf-8") as saida:
-        json.dump(conteudo, saida, ensure_ascii=False, indent=2)
-        saida.write("\n")
-        saida.flush()
-        # Sem o fsync, o rename pode chegar ao disco antes do conteúdo, e uma
-        # queda de energia deixaria exatamente o manifesto vazio que a escrita
-        # atômica existe para impedir.
-        os.fsync(saida.fileno())
-
-    temporario.replace(caminho)
-    return caminho
+    return escrever_json_atomico(caminho_do_manifesto(destino), conteudo)

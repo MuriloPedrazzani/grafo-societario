@@ -28,7 +28,6 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Final
 from urllib.parse import unquote
@@ -45,7 +44,7 @@ from tenacity import (
 
 from grafo_societario.config import Config
 from grafo_societario.ingest import manifesto
-from grafo_societario.ingest.manifesto import EntradaDoManifesto
+from grafo_societario.ingest.manifesto import EntradaDoManifesto, ModoDeVerificacao
 
 logger = logging.getLogger(__name__)
 
@@ -91,16 +90,6 @@ class CompetenciaIncompletaError(ErroDeIngestao):
 
 class FalhaTransitoriaError(ErroDeIngestao):
     """Falha que justifica nova tentativa: indisponibilidade ou resposta truncada."""
-
-
-class ModoDeVerificacao(StrEnum):
-    """Quanto esforço gastar para decidir se o que está em disco ainda serve."""
-
-    RAPIDA = "rapida"
-    """Tamanho e ETag, ambos vindos da listagem. Não lê o conteúdo do disco."""
-
-    COMPLETA = "completa"
-    """Recalcula o SHA-256 de cada arquivo local. Detecta corrupção silenciosa."""
 
 
 @dataclass(frozen=True)

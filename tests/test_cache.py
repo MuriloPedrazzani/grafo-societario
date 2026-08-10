@@ -16,8 +16,8 @@ import pytest
 from conftest import EstadoDoServidor
 from grafo_societario.config import Config
 from grafo_societario.ingest import downloader, manifesto
-from grafo_societario.ingest.downloader import ModoDeVerificacao, baixar_competencia
-from grafo_societario.ingest.manifesto import NOME_DO_ARQUIVO
+from grafo_societario.ingest.downloader import baixar_competencia
+from grafo_societario.ingest.manifesto import NOME_DO_ARQUIVO, ModoDeVerificacao
 
 CONTEUDO = b"PK\x03\x04" + b"bytes de teste " * 128
 
