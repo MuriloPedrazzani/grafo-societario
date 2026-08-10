@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,34 +22,45 @@ from grafo_societario.config import Config
 from grafo_societario.ingest.extract import extrair_competencia
 from grafo_societario.transform import bronze
 from grafo_societario.transform.bronze import (
+    COLUNAS_EMPRESAS,
     COLUNAS_ESTABELECIMENTOS,
+    COLUNAS_SOCIOS,
     ContagemDivergenteError,
     EspacoInsuficienteError,
     abrir_conexao,
     contar_registros,
+    converter_empresas,
     converter_estabelecimentos,
+    converter_principais,
+    converter_socios,
     verificar_espaco,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+MEMBROS = {
+    "Estabelecimentos0": "K3241.K03200Y0.D60613.ESTABELE",
+    "Empresas0": "K3241.K03200Y0.D60613.EMPRECSV",
+    "Socios0": "K3241.K03200Y0.D60613.SOCIOCSV",
+}
+
+
 @pytest.fixture
 def competencia_extraida(tmp_path: Path) -> Config:
-    """Empacota a fixture num ZIP e roda o extrator real, que transcodifica."""
+    """Empacota as fixtures em ZIP e roda o extrator real, que transcodifica."""
     config = Config(competencia="2026-06", data_dir=tmp_path)
     bruto = tmp_path / "bruto" / "2026-06"
     bruto.mkdir(parents=True)
-    with zipfile.ZipFile(bruto / "Estabelecimentos0.zip", "w", zipfile.ZIP_DEFLATED) as arquivo:
-        arquivo.writestr(
-            "K3241.K03200Y0.D60613.ESTABELE", (FIXTURES / "Estabelecimentos0.csv").read_bytes()
-        )
+    for nome, membro in MEMBROS.items():
+        with zipfile.ZipFile(bruto / f"{nome}.zip", "w", zipfile.ZIP_DEFLATED) as arquivo:
+            arquivo.writestr(membro, (FIXTURES / f"{nome}.csv").read_bytes())
     extrair_competencia(config)
     return config
 
 
-def registros_da_fixture() -> list[list[str]]:
-    with (FIXTURES / "Estabelecimentos0.csv").open(encoding="latin-1", newline="") as arquivo:
+def registros_da_fixture(nome: str = "Estabelecimentos0") -> list[list[str]]:
+    with (FIXTURES / f"{nome}.csv").open(encoding="latin-1", newline="") as arquivo:
         return list(csv.reader(arquivo, delimiter=";", quotechar='"'))
 
 
@@ -258,6 +270,101 @@ def test_sem_csv_de_entrada_a_mensagem_e_util(tmp_path: Path) -> None:
 
     with pytest.raises(bronze.ErroDeBronze, match="ingestão"):
         converter_estabelecimentos(config)
+
+
+# ------------------------------------------------------- Empresas e Socios
+
+
+@pytest.mark.parametrize(
+    ("converter", "fixture", "parquet_nome", "colunas"),
+    [
+        (converter_empresas, "Empresas0", "empresas0.parquet", COLUNAS_EMPRESAS),
+        (converter_socios, "Socios0", "socios0.parquet", COLUNAS_SOCIOS),
+    ],
+)
+def test_tabela_converte_com_colunas_declaradas_e_contagem_intacta(
+    competencia_extraida: Config,
+    converter: Callable[[Config], list[Path]],
+    fixture: str,
+    parquet_nome: str,
+    colunas: tuple[str, ...],
+) -> None:
+    esperado = len(registros_da_fixture(fixture))
+
+    gerados = converter(competencia_extraida)
+
+    assert [caminho.name for caminho in gerados] == [parquet_nome]
+    with duckdb.connect() as conexao:
+        descricao = conexao.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{gerados[0].as_posix()}')"
+        ).fetchall()
+        registros = unico(
+            conexao.execute(
+                f"SELECT count(*) FROM read_parquet('{gerados[0].as_posix()}')"
+            ).fetchone()
+        )
+    assert tuple(coluna[0] for coluna in descricao) == colunas
+    assert {coluna[1] for coluna in descricao} == {"VARCHAR"}
+    assert registros == esperado
+
+
+def test_capital_social_continua_texto_com_virgula(competencia_extraida: Config) -> None:
+    """Converter para decimal é trabalho do silver. Fidelidade vale para tipo também."""
+    esperados = {registro[4] for registro in registros_da_fixture("Empresas0")}
+    assert any("," in valor for valor in esperados), "a fixture precisa ter decimal com vírgula"
+
+    gerados = converter_empresas(competencia_extraida)
+
+    with duckdb.connect() as conexao:
+        tipo = unico(
+            conexao.execute(
+                f"SELECT column_type FROM (DESCRIBE SELECT * FROM "
+                f"read_parquet('{gerados[0].as_posix()}')) WHERE column_name = 'capital_social'"
+            ).fetchone()
+        )
+        obtidos = {
+            linha[0]
+            for linha in conexao.execute(
+                f"SELECT DISTINCT capital_social FROM read_parquet('{gerados[0].as_posix()}')"
+            ).fetchall()
+        }
+    assert tipo == "VARCHAR"
+    assert obtidos == esperados
+
+
+def test_socios_preserva_a_mascara_do_cpf_e_o_zero_a_esquerda(
+    competencia_extraida: Config,
+) -> None:
+    esperados = {registro[3] for registro in registros_da_fixture("Socios0") if registro[1] == "2"}
+    assert esperados, "a fixture precisa ter sócio pessoa física"
+
+    gerados = converter_socios(competencia_extraida)
+
+    with duckdb.connect() as conexao:
+        obtidos = {
+            linha[0]
+            for linha in conexao.execute(
+                f"SELECT DISTINCT cnpj_cpf_socio FROM read_parquet('{gerados[0].as_posix()}') "
+                "WHERE identificador_socio = '2'"
+            ).fetchall()
+        }
+        faixas = {
+            linha[0]
+            for linha in conexao.execute(
+                f"SELECT DISTINCT faixa_etaria FROM read_parquet('{gerados[0].as_posix()}')"
+            ).fetchall()
+        }
+    assert obtidos == esperados
+    assert all(valor.startswith("***") for valor in obtidos)
+    assert all(isinstance(valor, str) for valor in faixas)
+
+
+def test_converter_principais_gera_as_tres_tabelas(competencia_extraida: Config) -> None:
+    resultado = converter_principais(competencia_extraida)
+
+    assert set(resultado) == {"estabelecimentos", "empresas", "socios"}
+    assert all(caminhos for caminhos in resultado.values())
+    assert all(caminho.exists() for caminhos in resultado.values() for caminho in caminhos)
 
 
 def test_contagem_do_csv_usa_as_colunas_declaradas(competencia_extraida: Config) -> None:
