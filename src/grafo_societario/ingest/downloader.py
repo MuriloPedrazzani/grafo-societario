@@ -25,8 +25,10 @@ integridade é assunto do manifesto, não daqui.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 from urllib.parse import unquote
@@ -42,6 +44,8 @@ from tenacity import (
 )
 
 from grafo_societario.config import Config
+from grafo_societario.ingest import manifesto
+from grafo_societario.ingest.manifesto import EntradaDoManifesto
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +93,16 @@ class FalhaTransitoriaError(ErroDeIngestao):
     """Falha que justifica nova tentativa: indisponibilidade ou resposta truncada."""
 
 
+class ModoDeVerificacao(StrEnum):
+    """Quanto esforço gastar para decidir se o que está em disco ainda serve."""
+
+    RAPIDA = "rapida"
+    """Tamanho e ETag, ambos vindos da listagem. Não lê o conteúdo do disco."""
+
+    COMPLETA = "completa"
+    """Recalcula o SHA-256 de cada arquivo local. Detecta corrupção silenciosa."""
+
+
 @dataclass(frozen=True)
 class ArquivoRemoto:
     """Um arquivo do compartilhamento, como anunciado pelo servidor."""
@@ -97,6 +111,15 @@ class ArquivoRemoto:
     caminho: str
     tamanho: int
     etag: str
+    last_modified: str
+
+
+@dataclass(frozen=True)
+class ArquivoBaixado:
+    """Resultado de um download concluído, com o hash obtido no mesmo passe."""
+
+    caminho: Path
+    sha256: str
 
 
 def criar_cliente(config: Config) -> httpx.Client:
@@ -164,6 +187,7 @@ def listar_arquivos(cliente: httpx.Client, competencia: str) -> dict[str, Arquiv
             caminho=f"/{competencia}/{nome}",
             tamanho=int(tamanho),
             etag=prop.findtext(f"{_DAV}getetag") or "",
+            last_modified=prop.findtext(f"{_DAV}getlastmodified") or "",
         )
 
     if ignorados:
@@ -216,13 +240,28 @@ def _politica_de_retentativa() -> Retrying:
     )
 
 
-def _baixar_uma_vez(cliente: httpx.Client, arquivo: ArquivoRemoto, parcial: Path) -> None:
+def _semear_com_o_parcial(digestor: hashlib._Hash, parcial: Path, ate: int) -> None:
+    """Alimenta o digestor com os bytes já em disco, ao retomar um download.
+
+    É a única leitura extra que existe, e só acontece quando houve interrupção.
+    No caminho normal o hash sai no mesmo passe dos bytes que chegam da rede.
+    """
+    lidos = 0
+    with parcial.open("rb") as entrada:
+        while lidos < ate and (bloco := entrada.read(min(_BLOCO, ate - lidos))):
+            digestor.update(bloco)
+            lidos += len(bloco)
+
+
+def _baixar_uma_vez(cliente: httpx.Client, arquivo: ArquivoRemoto, parcial: Path) -> str:
     ja_em_disco = parcial.stat().st_size if parcial.exists() else 0
 
     cabecalhos: dict[str, str] = {}
     if ja_em_disco and arquivo.etag:
         cabecalhos["Range"] = f"bytes={ja_em_disco}-"
         cabecalhos["If-Range"] = arquivo.etag
+
+    digestor = hashlib.sha256()
 
     with cliente.stream("GET", arquivo.caminho, headers=cabecalhos) as resposta:
         if resposta.status_code in _TRANSITORIOS:
@@ -235,10 +274,13 @@ def _baixar_uma_vez(cliente: httpx.Client, arquivo: ArquivoRemoto, parcial: Path
                 "servidor recusou a retomada; o arquivo mudou na origem e recomeça do zero",
                 extra={"arquivo": arquivo.nome, "descartado_bytes": ja_em_disco},
             )
+        if retomando:
+            _semear_com_o_parcial(digestor, parcial, ja_em_disco)
 
         with parcial.open("ab" if retomando else "wb") as saida:
             for bloco in resposta.iter_bytes(_BLOCO):
                 saida.write(bloco)
+                digestor.update(bloco)
 
     recebido = parcial.stat().st_size
     if arquivo.tamanho and recebido != arquivo.tamanho:
@@ -246,35 +288,83 @@ def _baixar_uma_vez(cliente: httpx.Client, arquivo: ArquivoRemoto, parcial: Path
         raise FalhaTransitoriaError(
             f"{arquivo.nome} veio truncado: {recebido} bytes contra {arquivo.tamanho} anunciados"
         )
+    return digestor.hexdigest()
 
 
-def baixar_arquivo(cliente: httpx.Client, arquivo: ArquivoRemoto, destino: Path) -> Path:
+def baixar_arquivo(cliente: httpx.Client, arquivo: ArquivoRemoto, destino: Path) -> ArquivoBaixado:
     """Baixa um arquivo em streaming, com retomada e nova tentativa.
 
     Escreve num `.parcial` e só renomeia ao fim. Assim o arquivo com nome
     definitivo nunca existe pela metade, e uma interrupção não deixa lixo que
-    pareça um download bem-sucedido.
+    pareça um download bem-sucedido. O SHA-256 sai junto, sem releitura.
     """
     final = destino / arquivo.nome
     parcial = final.with_name(f"{arquivo.nome}.parcial")
 
+    sha256 = ""
     for tentativa in _politica_de_retentativa():
         with tentativa:
-            _baixar_uma_vez(cliente, arquivo, parcial)
+            sha256 = _baixar_uma_vez(cliente, arquivo, parcial)
     parcial.replace(final)
 
     logger.info(
         "arquivo baixado",
-        extra={"arquivo": arquivo.nome, "bytes": final.stat().st_size},
+        extra={"arquivo": arquivo.nome, "bytes": final.stat().st_size, "sha256": sha256},
     )
-    return final
+    return ArquivoBaixado(caminho=final, sha256=sha256)
 
 
-def baixar_competencia(config: Config, competencia: str | None = None) -> list[Path]:
-    """Baixa a competência inteira, validada antes de qualquer byte ser buscado."""
+def _ja_serve_o_que_esta_em_disco(
+    arquivo: ArquivoRemoto,
+    entrada: EntradaDoManifesto | None,
+    destino: Path,
+    modo: ModoDeVerificacao,
+) -> bool:
+    """Decide se dá para reaproveitar o arquivo local.
+
+    A verificação rápida usa só o que a listagem já trouxe — tamanho e ETag — e
+    não toca no conteúdo do disco. Reler 6,79 GiB para confirmar o que não mudou
+    custaria, em toda execução, quase o mesmo que baixar de novo.
+    """
+    if entrada is None:
+        return False
+
+    local = destino / arquivo.nome
+    if not local.exists():
+        return False
+    if entrada.tamanho != arquivo.tamanho or local.stat().st_size != arquivo.tamanho:
+        return False
+    if entrada.etag != arquivo.etag:
+        return False
+
+    if modo is ModoDeVerificacao.COMPLETA and manifesto.calcular_sha256(local) != entrada.sha256:
+        logger.warning(
+            "conteúdo local diverge do hash registrado; o arquivo será baixado de novo",
+            extra={"arquivo": arquivo.nome, "sha256_esperado": entrada.sha256},
+        )
+        return False
+
+    return True
+
+
+def baixar_competencia(
+    config: Config,
+    competencia: str | None = None,
+    modo: ModoDeVerificacao = ModoDeVerificacao.RAPIDA,
+) -> list[Path]:
+    """Baixa a competência, reaproveitando o que o manifesto já garante.
+
+    O manifesto é regravado a cada arquivo concluído. Uma interrupção no meio
+    preserva o que já terminou, em vez de jogar fora horas de download por causa
+    de um registro que só existia em memória.
+    """
     alvo = competencia or config.competencia
     destino = config.data_dir / "bruto" / alvo
     destino.mkdir(parents=True, exist_ok=True)
+    registro = manifesto.carregar(destino, alvo)
+
+    caminhos: list[Path] = []
+    reaproveitados = 0
 
     with criar_cliente(config) as cliente:
         arquivos = listar_arquivos(cliente, alvo)
@@ -282,7 +372,41 @@ def baixar_competencia(config: Config, competencia: str | None = None) -> list[P
 
         total = sum(arquivo.tamanho for arquivo in arquivos.values())
         logger.info(
-            "competência validada, iniciando download",
-            extra={"competencia": alvo, "arquivos": len(arquivos), "bytes_esperados": total},
+            "competência validada",
+            extra={
+                "competencia": alvo,
+                "arquivos": len(arquivos),
+                "bytes_esperados": total,
+                "verificacao": str(modo),
+            },
         )
-        return [baixar_arquivo(cliente, arquivos[nome], destino) for nome in sorted(arquivos)]
+
+        for nome in sorted(arquivos):
+            remoto = arquivos[nome]
+            if _ja_serve_o_que_esta_em_disco(remoto, registro.entradas.get(nome), destino, modo):
+                reaproveitados += 1
+                caminhos.append(destino / nome)
+                continue
+
+            baixado = baixar_arquivo(cliente, remoto, destino)
+            registro.registrar(
+                EntradaDoManifesto.agora(
+                    nome=nome,
+                    tamanho=remoto.tamanho,
+                    sha256=baixado.sha256,
+                    etag=remoto.etag,
+                    last_modified=remoto.last_modified,
+                )
+            )
+            manifesto.gravar(registro, destino)
+            caminhos.append(baixado.caminho)
+
+    logger.info(
+        "competência pronta",
+        extra={
+            "competencia": alvo,
+            "reaproveitados": reaproveitados,
+            "baixados": len(caminhos) - reaproveitados,
+        },
+    )
+    return caminhos

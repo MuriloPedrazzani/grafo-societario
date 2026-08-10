@@ -49,6 +49,9 @@ class ServidorFalso(ThreadingHTTPServer):
     estado: EstadoDoServidor
 
 
+MODIFICADO_EM = "Sun, 14 Jun 2026 19:07:57 GMT"
+
+
 def _multistatus(entradas: list[tuple[str, bool, int, str]]) -> bytes:
     partes = ['<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">']
     for href, colecao, tamanho, etag in entradas:
@@ -59,6 +62,7 @@ def _multistatus(entradas: list[tuple[str, bool, int, str]]) -> bytes:
                 "<d:resourcetype/>"
                 f"<d:getcontentlength>{tamanho}</d:getcontentlength>"
                 f"<d:getetag>{escape(etag)}</d:getetag>"
+                f"<d:getlastmodified>{MODIFICADO_EM}</d:getlastmodified>"
             )
         partes.append(
             f"<d:response><d:href>{escape(href)}</d:href><d:propstat><d:prop>{prop}</d:prop>"

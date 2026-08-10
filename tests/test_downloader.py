@@ -140,9 +140,9 @@ def test_retenta_apos_falha_intermitente(
 
     with criar_cliente(config_de_teste) as cliente:
         arquivo = listar_arquivos(cliente, "2026-06")["Socios0.zip"]
-        destino = baixar_arquivo(cliente, arquivo, tmp_path)
+        baixado = baixar_arquivo(cliente, arquivo, tmp_path)
 
-    assert destino.read_bytes() == CONTEUDO
+    assert baixado.caminho.read_bytes() == CONTEUDO
     tentativas = [pedido for pedido in estado.requisicoes if pedido[0] == "GET"]
     assert len(tentativas) == 3
 
@@ -158,9 +158,9 @@ def test_retoma_parcial_enviando_range_e_if_range(
 
     with criar_cliente(config_de_teste) as cliente:
         arquivo = listar_arquivos(cliente, "2026-06")["Empresas0.zip"]
-        destino = baixar_arquivo(cliente, arquivo, tmp_path)
+        baixado = baixar_arquivo(cliente, arquivo, tmp_path)
 
-    assert destino.read_bytes() == CONTEUDO
+    assert baixado.caminho.read_bytes() == CONTEUDO
     cabecalhos = estado.cabecalhos_de("GET", "Empresas0.zip")
     assert cabecalhos["range"] == "bytes=100-"
     assert cabecalhos["if-range"] == '"etag-de-Empresas0.zip"'
@@ -183,11 +183,12 @@ def test_arquivo_alterado_na_origem_recomeca_do_zero(
             caminho=arquivo.caminho,
             tamanho=arquivo.tamanho,
             etag='"etag-de-uma-versao-antiga"',
+            last_modified=arquivo.last_modified,
         )
-        destino = baixar_arquivo(cliente, alterado, tmp_path)
+        baixado = baixar_arquivo(cliente, alterado, tmp_path)
 
-    assert destino.read_bytes() == CONTEUDO
-    assert b"restos" not in destino.read_bytes()
+    assert baixado.caminho.read_bytes() == CONTEUDO
+    assert b"restos" not in baixado.caminho.read_bytes()
 
 
 def test_arquivo_truncado_e_recusado_e_o_parcial_some(
@@ -220,6 +221,7 @@ def test_erro_de_cliente_nao_e_retentado(
             caminho="/2026-06/NaoExiste.zip",
             tamanho=len(CONTEUDO),
             etag='"etag-de-Paises.zip"',
+            last_modified="Sun, 14 Jun 2026 19:07:57 GMT",
         )
         with pytest.raises(httpx.HTTPStatusError):
             baixar_arquivo(cliente, ausente, tmp_path)
