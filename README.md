@@ -4,7 +4,7 @@
 
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
-> **Status:** em desenvolvimento — Fase 1 de 9. Este README é atualizado a cada fase concluída.
+> **Status:** em desenvolvimento — Fase 2 de 9. Este README é atualizado a cada fase concluída.
 
 ---
 
@@ -85,6 +85,20 @@ grafo-societario ingest --verificar-integridade # confere o SHA-256 do que está
 Uma competência ocupa **6,79 GiB comprimidos** e **23,24 GiB** depois de extraída;
 o espaço é conferido antes de a extração começar. Rodar de novo não rebaixa nada:
 o manifesto registra tamanho, SHA-256, ETag e origem de cada arquivo.
+
+A camada bronze converte esses CSVs em Parquet sem alterar conteúdo — todas as
+colunas como texto, nada inferido:
+
+| | CSV | Parquet | Registros |
+|---|---:|---:|---:|
+| Estabelecimentos | 15,59 GiB | 3,38 GiB | 71.874.448 |
+| Empresas | 4,99 GiB | 1,03 GiB | 68.629.148 |
+| Sócios | 2,66 GiB | 0,50 GiB | 27.838.448 |
+| **Total** | **23,24 GiB** | **4,91 GiB** | **168.342.044** |
+
+Cerca de **21%** do tamanho original, com pico de memória de **1,83 GiB** — dentro
+da restrição de 8 GiB do projeto, com folga. A contagem de registros é conferida
+antes e depois de cada conversão, e divergência interrompe o processo.
 
 A configuração vive em variáveis de ambiente — veja [`.env.example`](.env.example).
 `COMPETENCIA` é a única obrigatória.

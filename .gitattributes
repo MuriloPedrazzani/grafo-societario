@@ -1,0 +1,6 @@
+# As fixtures reproduzem byte a byte o formato da Receita Federal: terminador LF,
+# codificação latin-1 e, em alguns campos, quebra de linha dentro de campo citado.
+# Com `core.autocrlf=true` — o padrão em instalações Windows — o checkout as
+# converteria para CRLF e elas deixariam de descrever a fonte. Tratá-las como
+# binário desliga qualquer conversão, nos dois sentidos.
+tests/fixtures/*.csv -text

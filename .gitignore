@@ -6,6 +6,11 @@ data/
 *.npy
 *.duckdb
 
+# Exceção: as fixtures são amostras de poucos KB, versionadas de propósito.
+# Sem esta linha o padrão *.csv acima as engole em silêncio, e a suíte quebra
+# só no primeiro clone limpo.
+!tests/fixtures/*.csv
+
 # Ambiente
 .env
 
