@@ -4,7 +4,7 @@
 
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
-> **Status:** em desenvolvimento — Fase 0 de 9. Este README é atualizado a cada fase concluída.
+> **Status:** em desenvolvimento — Fase 1 de 9. Este README é atualizado a cada fase concluída.
 
 ---
 
@@ -72,14 +72,25 @@ Decisões arquiteturais e seus trade-offs estão documentados em [`docs/adr/`](d
 
 ## Reprodução
 
-> Documentação completa de execução será publicada ao final da Fase 1.
+A aquisição já funciona ponta a ponta. As demais etapas chegam nas fases seguintes.
 
 ```bash
-make ingest   # baixa e extrai os dados da Receita Federal
-make build    # bronze → silver → grafo CSR
-make serve    # sobe a API local
-make test     # suíte de testes
+pip install -e ".[dev]"
+
+grafo-societario ingest --competencia 2026-06   # baixa e extrai da Receita Federal
+grafo-societario ingest --ultima                # usa a competência mais recente completa
+grafo-societario ingest --verificar-integridade # confere o SHA-256 do que está em disco
 ```
+
+Uma competência ocupa **6,79 GiB comprimidos** e **23,24 GiB** depois de extraída;
+o espaço é conferido antes de a extração começar. Rodar de novo não rebaixa nada:
+o manifesto registra tamanho, SHA-256, ETag e origem de cada arquivo.
+
+A configuração vive em variáveis de ambiente — veja [`.env.example`](.env.example).
+`COMPETENCIA` é a única obrigatória.
+
+> O passo a passo completo, do clone ao deploy, com o tempo esperado de cada
+> etapa, é publicado na Fase 8.
 
 ## Fonte de dados
 
