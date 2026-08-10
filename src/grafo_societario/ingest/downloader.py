@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -42,7 +43,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from grafo_societario.config import Config
+from grafo_societario.config import ConexaoRfb, Config
 from grafo_societario.ingest import manifesto
 from grafo_societario.ingest.manifesto import EntradaDoManifesto, ModoDeVerificacao
 
@@ -111,7 +112,34 @@ class ArquivoBaixado:
     sha256: str
 
 
-def criar_cliente(config: Config) -> httpx.Client:
+def resolver_competencia_mais_recente(cliente: httpx.Client) -> str:
+    """Devolve a competência mais recente que está completa.
+
+    Percorre da mais nova para a mais antiga porque a última publicada pode estar
+    em pleno envio. Cada candidata descartada é registrada no log, e a escolhida
+    também: uma competência escolhida em silêncio é uma competência que ninguém
+    vai conferir.
+    """
+    for competencia in reversed(listar_competencias(cliente)):
+        faltando = ARQUIVOS_ESPERADOS - listar_arquivos(cliente, competencia).keys()
+        if not faltando:
+            logger.info(
+                "competência mais recente completa foi escolhida",
+                extra={"competencia": competencia},
+            )
+            return competencia
+        logger.info(
+            "competência descartada por estar incompleta",
+            extra={"competencia": competencia, "faltando": len(faltando)},
+        )
+
+    raise CompetenciaIncompletaError(
+        "Nenhuma competência do compartilhamento está completa. "
+        "Ou a origem mudou de formato, ou a publicação está em andamento."
+    )
+
+
+def criar_cliente(config: ConexaoRfb) -> httpx.Client:
     """Cliente apontado para a raiz do compartilhamento.
 
     O token vai como usuário do Basic auth, com senha vazia — é assim que o
@@ -340,6 +368,7 @@ def baixar_competencia(
     config: Config,
     competencia: str | None = None,
     modo: ModoDeVerificacao = ModoDeVerificacao.RAPIDA,
+    ao_progredir: Callable[[str, int, int], None] | None = None,
 ) -> list[Path]:
     """Baixa a competência, reaproveitando o que o manifesto já garante.
 
@@ -370,7 +399,9 @@ def baixar_competencia(
             },
         )
 
-        for nome in sorted(arquivos):
+        for posicao, nome in enumerate(sorted(arquivos), start=1):
+            if ao_progredir is not None:
+                ao_progredir(nome, posicao, len(arquivos))
             remoto = arquivos[nome]
             if _ja_serve_o_que_esta_em_disco(remoto, registro.entradas.get(nome), destino, modo):
                 reaproveitados += 1

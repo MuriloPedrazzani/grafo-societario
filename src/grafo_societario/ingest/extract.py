@@ -30,6 +30,7 @@ import hashlib
 import logging
 import shutil
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -284,6 +285,7 @@ def extrair_competencia(
     config: Config,
     competencia: str | None = None,
     modo: ModoDeVerificacao = ModoDeVerificacao.RAPIDA,
+    ao_progredir: Callable[[str, int, int], None] | None = None,
 ) -> list[Path]:
     """Extrai todos os ZIPs baixados de uma competência."""
     alvo = competencia or config.competencia
@@ -314,7 +316,9 @@ def extrair_competencia(
     )
 
     extraidos: list[Path] = []
-    for caminho in zips:
+    for posicao, caminho in enumerate(zips, start=1):
+        if ao_progredir is not None:
+            ao_progredir(caminho.name, posicao, len(zips))
         extraidos.extend(extrair_arquivo(caminho, destino, registro, modo))
         if not config.manter_zip:
             caminho.unlink()

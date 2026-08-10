@@ -21,7 +21,11 @@ dependencies = [
     "pydantic-settings>=2.7",
     "httpx>=0.28",
     "tenacity>=9.0",
+    "typer>=0.15",
 ]
+
+[project.scripts]
+grafo-societario = "grafo_societario.cli:main"
 
 [project.optional-dependencies]
 dev = [
