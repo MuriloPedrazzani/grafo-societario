@@ -31,13 +31,43 @@ Nem tudo que o pipeline precisa saber está no PDF. A distinção é deliberada:
 | Mascaramento do CPF | PDF, item 2 | **Confirmado na fonte oficial** |
 | Códigos de identificador de sócio | PDF, layout Sócios | **Confirmado na fonte oficial** |
 | CNAE secundária separada por vírgula | PDF, item 5 | **Confirmado na fonte oficial** |
-| Ausência de linha de cabeçalho | Não consta no PDF | A conferir contra o arquivo real |
-| Codificação `latin-1` | Não consta no PDF | A conferir contra o arquivo real |
-| Decimal com vírgula no capital social | Não consta no PDF | A conferir contra o arquivo real |
-| Uso inconsistente de aspas | Não consta no PDF | A conferir contra o arquivo real |
+| Ausência de linha de cabeçalho | Arquivo real | **Confirmado** — a primeira linha já é dado |
+| Codificação `latin-1` | Arquivo real | **Confirmado** — ver seção abaixo |
+| Decimal com vírgula no capital social | Arquivo real | **Confirmado** — 100% de 600 mil valores |
+| Uso de aspas | Arquivo real | **Confirmado, e ao contrário do presumido:** é consistente |
+| Separador dentro de campo citado | Arquivo real | **Confirmado** — 4 a 5% de Estabelecimentos |
+| Quebra de linha dentro de campo citado | Arquivo real | **Confirmado** — raro, mas existe |
 
-As quatro últimas linhas só saem de "a conferir" na Fase 2, quando as fixtures
-com amostra real forem lidas. Até lá, o pipeline não deve tratá-las como certas.
+As quatro últimas do primeiro grupo estavam marcadas como "a conferir" até que os
+23,24 GiB da competência 2026-06 fossem baixados e lidos, em 2026-08-10. As duas
+últimas da tabela nem eram suspeitadas: apareceram na leitura.
+
+### O que a leitura do arquivo real mudou
+
+**As aspas são consistentes, não inconsistentes.** A suposição inicial era de
+aspas irregulares. É o oposto: **todo** campo vem entre aspas duplas, inclusive
+numéricos e vazios — estes últimos gravados como `""`. O terminador de linha é
+`LF`, não `CRLF`.
+
+**O decimal usa vírgula e nunca ponto.** Dos 600 mil valores de `capital_social`
+analisados em três partições, **100%** casam com `^\d+,\d{2}$`: sempre duas casas,
+e **nenhuma** ocorrência de ponto como separador de milhar.
+
+**A codificação é `latin-1`, e não `cp1252`.** A distinção importa porque um dos
+dois quebra. Em 23,24 GiB há apenas 5 bytes na faixa `0x80–0x9F`, todos com valor
+`0x8F` — que é **posição não atribuída** em cp1252, de modo que decodificar esses
+arquivos como cp1252 levanta exceção. E dos 26 bytes que cp1252 atribui nessa
+faixa (aspas curvas, travessões, apóstrofo), **nenhum** aparece nas 168.349.459
+linhas: se a origem fosse cp1252, eles estariam em razão social e nome fantasia.
+
+Note que "latin-1 decodificou sem erro" **não** é argumento: latin-1 mapeia os 256
+bytes possíveis e nunca falha em arquivo nenhum.
+
+**Contagem de linha física não é contagem de registro.** Como há quebra de linha
+dentro de campo citado, `Estabelecimentos6` tem 4.753.436 linhas físicas para
+4.753.435 registros. As partições 1 a 9 de cada grupo têm contagem de registros
+idêntica entre si — a Receita divide por quantidade fixa, com o resto na partição
+`0`, que por isso concentra cerca de 40% do volume do grupo.
 
 ## Formato
 
@@ -200,5 +230,7 @@ automática de separador — despedaça a linha inteira, não só esta coluna.
 - **Nomes e URLs dos arquivos ZIP.** A distribuição mudou no fim de janeiro de
   2026 e deixou de ser listagem de diretório. Isso é assunto da aquisição de
   dados, não do layout.
-- **Codificação, cabeçalho e uso de aspas**, pelos motivos da tabela de
-  procedência: só entram aqui depois de conferidos contra o arquivo real.
+- **O domínio de valores de cada código.** Este documento diz que
+  `situacao_cadastral` é código e que a fonte é inconsistente no zero à esquerda;
+  não diz quais valores ocorrem de fato, nem em que proporção. Isso sai da camada
+  silver, quando houver contagem por valor.
