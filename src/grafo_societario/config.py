@@ -76,6 +76,11 @@ class Config(BaseSettings):
     rfb_url_base: str = "https://arquivos.receitafederal.gov.br"
     """Host do compartilhamento público da Receita Federal."""
 
+    manter_zip: bool = True
+    """Preserva o ZIP depois de extrair. Descartar libera disco, mas destrói o
+    cache de download: a execução seguinte rebaixaria 6,79 GiB da Receita para
+    economizar espaço que já estava pago."""
+
     rfb_token_compartilhamento: str = "YggdBLfdninEJX9"
     """Token do compartilhamento. Tem padrão embutido de propósito: exigir
     configuração aqui quebraria a reprodução por quem apenas clona o repositório.
