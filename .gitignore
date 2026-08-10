@@ -1,0 +1,26 @@
+# Dados (gigabytes, reprodutíveis a partir da fonte)
+data/
+*.zip
+*.csv
+*.parquet
+*.npy
+*.duckdb
+
+# Ambiente
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Sistema
+.DS_Store
+Thumbs.db
