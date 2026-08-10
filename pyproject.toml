@@ -19,6 +19,8 @@ classifiers = [
 dynamic = ["version"]
 dependencies = [
     "pydantic-settings>=2.7",
+    "httpx>=0.28",
+    "tenacity>=9.0",
 ]
 
 [project.optional-dependencies]

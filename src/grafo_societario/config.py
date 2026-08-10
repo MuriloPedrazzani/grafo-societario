@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -72,6 +73,14 @@ class Config(BaseSettings):
     data_dir: Path = Path("data")
     """Raiz onde os dados baixados e processados são gravados."""
 
+    rfb_url_base: str = "https://arquivos.receitafederal.gov.br"
+    """Host do compartilhamento público da Receita Federal."""
+
+    rfb_token_compartilhamento: str = "YggdBLfdninEJX9"
+    """Token do compartilhamento. Tem padrão embutido de propósito: exigir
+    configuração aqui quebraria a reprodução por quem apenas clona o repositório.
+    Se a Receita rotacionar o compartilhamento, muda a variável, não o código."""
+
     @field_validator("uf_alvo")
     @classmethod
     def _uf_conhecida(cls, valor: str) -> str:
@@ -79,6 +88,27 @@ class Config(BaseSettings):
         if uf not in UFS_VALIDAS:
             raise ValueError(f"{valor!r} não é uma sigla de UF. Use uma das 27, por exemplo SP.")
         return uf
+
+    @field_validator("rfb_url_base")
+    @classmethod
+    def _url_utilizavel(cls, valor: str) -> str:
+        url = valor.strip().rstrip("/")
+        partes = urlsplit(url)
+        if partes.scheme == "https":
+            return url
+        if partes.scheme == "http" and partes.hostname in {"localhost", "127.0.0.1", "::1"}:
+            return url
+        raise ValueError(
+            f"{valor!r} precisa usar https://. A única exceção é servidor local de teste."
+        )
+
+    @field_validator("rfb_token_compartilhamento")
+    @classmethod
+    def _token_preenchido(cls, valor: str) -> str:
+        token = valor.strip()
+        if not token:
+            raise ValueError("não pode ser vazio; deixe em branco para usar o padrão embutido.")
+        return token
 
     @field_validator("competencia")
     @classmethod

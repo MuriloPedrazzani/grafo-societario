@@ -30,3 +30,5 @@ repos:
         additional_dependencies:
           - pydantic-settings>=2.7
           - pytest>=8.0
+          - httpx>=0.28
+          - tenacity>=9.0
