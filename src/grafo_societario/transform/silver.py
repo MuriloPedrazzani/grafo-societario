@@ -34,6 +34,15 @@ para uma linha, o desempate é pelo menor `cnpj_ordem` — determinístico, para
 artefato ser o mesmo entre execuções — e a quantidade de casos vai para o log de
 toda execução, inclusive quando é zero. Colapso silencioso é o que não pode
 acontecer; colapso contado é aritmética honesta.
+
+**Todo join com tabela de domínio é LEFT, e os não-casados são contados.** Vale
+para natureza jurídica, porte, qualificação, município, país e CNAE, sem exceção
+e sem discussão caso a caso. A razão é medida, não suposta: o código `36` de
+qualificação aparece em 782 empresas do recorte de SP e **não existe** entre as 68
+linhas de `Qualificacoes`. As tabelas de decodificação da Receita não cobrem a
+própria Receita. Um join interno teria apagado essas 782 empresas do projeto sem
+erro nenhum; o LEFT as mantém sem descrição, e o contador põe o número no log de
+toda execução.
 """
 
 from __future__ import annotations
@@ -72,6 +81,18 @@ class RecorteVazioError(ErroDeSilver):
     """Nenhuma matriz na UF alvo."""
 
 
+class RecorteAusenteError(ErroDeSilver):
+    """A tipagem foi pedida antes de o recorte por UF existir."""
+
+
+class CapitalSocialMalformadoError(ErroDeSilver):
+    """Algum `capital_social` não casa com o formato da fonte."""
+
+
+class EmpresaAusenteError(ErroDeSilver):
+    """Um `cnpj_basico` do recorte não tem linha em Empresas."""
+
+
 class CnpjBasicoDuplicadoError(ErroDeSilver):
     """O recorte saiu com `cnpj_basico` repetido."""
 
@@ -100,17 +121,25 @@ class Recorte:
 
 
 def _fonte_de_estabelecimentos(config: Config, competencia: str) -> str:
-    """Cláusula de leitura das partições de Estabelecimentos do bronze.
+    return _fonte_do_bronze(config, competencia, "estabelecimentos")
+
+
+def _fonte_de_empresas(config: Config, competencia: str) -> str:
+    return _fonte_do_bronze(config, competencia, "empresas")
+
+
+def _fonte_do_bronze(config: Config, competencia: str, tabela: str) -> str:
+    """Cláusula de leitura das partições de uma tabela do bronze.
 
     A ausência é conferida aqui para que ela chegue como instrução do que fazer.
     Sem isto o DuckDB levanta uma `IOException` sobre um glob que não casou, e
     quem só esqueceu de rodar o bronze precisa deduzir isso de um erro de I/O.
     """
     entrada = config.data_dir / "bronze" / competencia
-    padrao = entrada / "estabelecimentos*.parquet"
+    padrao = entrada / f"{tabela}*.parquet"
     if not sorted(entrada.glob(padrao.name)):
         raise BronzeAusenteError(
-            f"Nenhum Parquet de estabelecimentos em {entrada}. Rode o bronze desta "
+            f"Nenhum Parquet de {tabela} em {entrada}. Rode o bronze desta "
             f"competência antes do silver."
         )
     return f"read_parquet('{padrao.as_posix()}')"
@@ -225,4 +254,415 @@ def aplicar_recorte_por_uf(config: Config, competencia: str | None = None) -> Re
         empresas=empresas,
         matrizes_repetidas=repetidas,
         situacoes=situacoes,
+    )
+
+
+# --------------------------------------------------------------------- empresas
+
+MARCA_DE_SUPRESSAO: Final = "[NUMERO SUPRIMIDO]"
+"""O que fica no lugar do documento. A marca não afirma que o número era um CPF —
+parte dos casos é código de SCP —, apenas que havia dígitos suficientes para ser
+um e que eles não estão mais ali. Dizer "CPF" seria afirmar o que não se sabe."""
+
+PADROES_DE_DOCUMENTO: Final = (
+    r"[0-9]{3}\.[0-9]{3}\.[0-9]{3}-[0-9]{2}",
+    r"[0-9]{3}\.[0-9]{3}\.[0-9]{3}\.[0-9]{2}",
+    r"[0-9]{3} [0-9]{3} [0-9]{3} [0-9]{2}",
+    r"[0-9]{10,}",
+)
+"""O que é apagado da razão social, medido contra o recorte de SP em 2026-06.
+
+Os três primeiros são o CPF pontuado, nas variantes que a fonte realmente tem: 37
+registros com hífen, 1 com ponto no lugar dele, 4 com espaço. Nenhum é alcançado
+por regra de dígito corrido, porque a pontuação quebra a sequência.
+
+O quarto é a regra de volume — 5.195.455 registros, 26,28% do recorte — e o limite
+é **dez**, não onze. Onze é o comprimento do CPF, e é o que a decisão original
+previa. A leitura do arquivo achou `LUIZ FIRMINO DA SILVA 6677354881`: nome de
+pessoa seguido de dez dígitos, que é um CPF cujo zero à esquerda se perdeu em
+algum ponto da cadeia. Descer o limite para dez custa a supressão de cerca de 110
+códigos de SCP em 19,7 milhões de registros; mantê-lo em onze custa publicar um
+CPF, e essa troca não é próxima.
+
+Sequências de doze ou mais dígitos são CNPJ — cinco registros, todos públicos — e
+caem na mesma regra porque separá-las só acrescenta caminho para errar. O
+`cnpj_basico` já é coluna própria, então nada se perde.
+
+Comprimento é aproximação, e sozinho ele deixa passar caso real. O que fecha a
+lacuna é `PADRAO_DE_CPF_PARTIDO` e `DIGITOS_DE_CPF_ENCURTADO`, abaixo, que somam
+cobertura a esta regra e nunca a substituem.
+"""
+
+PADRAO_DE_CPF_PARTIDO: Final = r"[0-9]{9}[-. ][0-9]{2}"
+"""CPF canônico sem os pontos: a base de nove dígitos, um separador, os dois
+dígitos verificadores.
+
+Regra de comprimento não alcança isto, porque o separador parte a sequência em
+nove e dois. São 6.530 ocorrências em Empresas, das quais **6.460 validam como
+CPF** ao serem juntadas — 98,9%. Delas, **6.518 escapavam** da regra de dígito
+corrido. No recorte de SP é uma só, e uma pessoa é uma pessoa.
+
+A fonte não deixa dúvida sobre o que são: `GETULIO SOARES CRUZ CPF 177495146-00`,
+`LAZARO FREITAS DE OLIVEIRA C P F 170347796 00`. A palavra vem escrita ao lado.
+
+A supressão aqui é condicionada ao dígito verificador, não à forma: `123456789-99`
+não é CPF e permanece. É a diferença entre suprimir o que é documento e suprimir
+o que se parece com um."""
+
+DIGITOS_DE_CPF_ENCURTADO: Final = 9
+"""Comprimento de um CPF que perdeu dois zeros à esquerda.
+
+Onze dígitos menos dois zeros são nove, e nove passa por baixo do limiar de dez.
+São 542 sequências de nove dígitos em Empresas que validam como CPF ao serem
+preenchidas à esquerda, e uma no recorte de SP: `VANDERLEI LORO 886812895`, que
+é `00886812895`.
+
+Como no padrão acima, o verificador de dígito é quem decide. Nove dígitos que não
+formam CPF continuam intactos — é o que separa esta regra de baixar o limiar para
+nove, que apagaria número de inscrição, código de SCP e o que mais tiver o mesmo
+comprimento."""
+
+
+def _encadear_supressao(patamar: str) -> str:
+    """Aninha um `regexp_replace` por padrão de forma conhecida, do dentro para fora."""
+    expressao = patamar
+    for padrao in PADROES_DE_DOCUMENTO:
+        expressao = f"regexp_replace({expressao}, '{padrao}', '{MARCA_DE_SUPRESSAO}', 'g')"
+    return expressao
+
+
+_MACROS: Final = f"""
+CREATE OR REPLACE TEMP MACRO _soma_de_cpf(numero, tamanho) AS (
+  list_sum(list_transform(generate_series(1, tamanho),
+    i -> CAST(substr(numero, i, 1) AS INTEGER) * (tamanho + 2 - i)))
+);
+
+CREATE OR REPLACE TEMP MACRO cpf_valido(numero) AS (
+  numero IS NOT NULL
+  AND regexp_matches(numero, '^[0-9]{{11}}$')
+  AND numero <> repeat(substr(numero, 1, 1), 11)
+  AND (_soma_de_cpf(numero, 9) * 10 % 11) % 10 = CAST(substr(numero, 10, 1) AS INTEGER)
+  AND (_soma_de_cpf(numero, 10) * 10 % 11) % 10 = CAST(substr(numero, 11, 1) AS INTEGER)
+);
+
+CREATE OR REPLACE TEMP MACRO _sem_forma_conhecida(texto) AS (
+  {_encadear_supressao("texto")}
+);
+
+CREATE OR REPLACE TEMP MACRO _sem_cpf_partido(texto) AS (
+  list_reduce(
+    list_prepend(texto, list_filter(
+      regexp_extract_all(texto, '{PADRAO_DE_CPF_PARTIDO}'),
+      achado -> cpf_valido(substr(achado, 1, 9) || substr(achado, 11, 2)))),
+    (acumulado, achado) -> replace(acumulado, achado, '{MARCA_DE_SUPRESSAO}'))
+);
+
+CREATE OR REPLACE TEMP MACRO _sem_cpf_encurtado(texto) AS (
+  list_reduce(
+    list_prepend(texto, list_filter(
+      regexp_extract_all(texto, '[0-9]+'),
+      achado -> length(achado) = {DIGITOS_DE_CPF_ENCURTADO}
+                AND cpf_valido(lpad(achado, 11, '0')))),
+    (acumulado, achado) -> replace(acumulado, achado, '{MARCA_DE_SUPRESSAO}'))
+);
+
+CREATE OR REPLACE TEMP MACRO suprimir_documentos(texto) AS (
+  CASE
+    WHEN texto IS NULL THEN NULL
+    WHEN NOT regexp_matches(texto, '[0-9]') THEN texto
+    ELSE _sem_cpf_encurtado(_sem_cpf_partido(_sem_forma_conhecida(texto)))
+  END
+);
+"""
+"""As regras de supressão, como macro do próprio motor.
+
+Elas são compostas nesta ordem, e a ordem é o que as mantém corretas. As formas
+conhecidas saem primeiro, incluindo toda sequência de dez ou mais dígitos; só
+depois disso é que a busca por CPF partido pode confiar que uma sequência de nove
+seguida de dois é mesmo isso, e não um pedaço de sequência maior.
+
+Ficam no motor, e não em Python, porque um `UDF` seria chamado uma vez por linha
+sobre dezenove milhões e setecentas mil delas. A validação de dígito verificador
+aqui é a mesma de `cpf_valido` em `tests/test_fixtures.py`, e o teste que compara
+as duas existe para que continuem sendo.
+"""
+
+DESCRICAO_DE_PORTE: Final = {
+    "00": "Não informado",
+    "01": "Micro empresa",
+    "03": "Empresa de pequeno porte",
+    "05": "Demais",
+}
+"""Porte não tem tabela de decodificação na fonte, então a legenda mora aqui.
+
+Os códigos `02` e `04` não são definidos pelo PDF e não aparecem no arquivo. Eles
+ficam **sem descrição** de propósito, e a quantidade vai para o log: inventar
+significado é pior que devolver nulo, porque o nulo ao menos aparece.
+"""
+
+COLUNAS_SILVER_EMPRESAS: Final = (
+    "cnpj_basico",
+    "razao_social",
+    "natureza_juridica",
+    "natureza_juridica_descricao",
+    "qualificacao_do_responsavel",
+    "qualificacao_do_responsavel_descricao",
+    "capital_social",
+    "porte",
+    "porte_descricao",
+    "ente_federativo_responsavel",
+)
+"""O esquema publicável de empresas. Nenhuma coluna de contato existe em Empresas,
+mas a lista é explícita para que acrescentar uma seja uma decisão visível."""
+
+_COLUNAS_DE_CONTEUDO: Final = (
+    "razao_social",
+    "natureza_juridica",
+    "qualificacao_do_responsavel",
+    "capital_social",
+    "porte",
+    "ente_federativo_responsavel",
+)
+
+FORMATO_DO_CAPITAL: Final = r"^[0-9]+,[0-9]{2}$"
+"""Como o capital vem: vírgula decimal, duas casas, sem separador de milhar.
+Casou em 100% dos registros do recorte. É conferido em vez de suposto porque
+`TRY_CAST` sobre o que não casa devolveria nulo em silêncio, que é a forma exata
+de perder dado sem ninguém notar."""
+
+
+def definir_macros(conexao: duckdb.DuckDBPyConnection) -> None:
+    """Instala as macros de supressão na conexão. Idempotente."""
+    conexao.execute(_MACROS)
+
+
+def _suprimir_documentos(coluna: str) -> str:
+    """Expressão SQL que apaga da coluna todo documento reconhecível."""
+    return f"suprimir_documentos({coluna})"
+
+
+def _campos_preenchidos() -> str:
+    """Quantos campos de conteúdo a linha traz, para desempatar `cnpj_basico`."""
+    return " + ".join(
+        f"(CASE WHEN nullif(trim(coalesce({coluna}, '')), '') IS NULL THEN 0 ELSE 1 END)"
+        for coluna in _COLUNAS_DE_CONTEUDO
+    )
+
+
+def _descricao_de_porte() -> str:
+    ramos = " ".join(
+        f"WHEN '{codigo}' THEN '{descricao}'" for codigo, descricao in DESCRICAO_DE_PORTE.items()
+    )
+    return (
+        "CASE WHEN nullif(trim(coalesce(porte, '')), '') IS NULL THEN "
+        f"'{DESCRICAO_DE_PORTE['00']}' ELSE (CASE porte {ramos} ELSE NULL END) END"
+    )
+
+
+@dataclass(frozen=True)
+class EmpresasTipadas:
+    """O que a tipagem produziu, com tudo que precisou ser decidido pelo caminho."""
+
+    caminho: Path
+
+    registros: int
+    """Uma linha por `cnpj_basico` do recorte. Diferente disso é erro."""
+
+    cnpj_basico_repetidos: int
+    """Quantos `cnpj_basico` vinham repetidos em Empresas e colapsaram."""
+
+    razoes_sociais_suprimidas: int
+    """Quantas razões sociais perderam um documento. É o tamanho do vazamento que
+    a fonte tem e o artefato publicado não terá."""
+
+    capital_ausente: int
+    natureza_sem_descricao: int
+    qualificacao_sem_descricao: int
+    porte_sem_descricao: int
+
+
+def tipar_empresas(config: Config, competencia: str | None = None) -> EmpresasTipadas:
+    """Tipa, decodifica e suprime documento da tabela de empresas do recorte.
+
+    **O CPF sai aqui, não na API.** Os artefatos deste projeto vão para GitHub
+    Release e para imagem Docker. Uma `razao_social` crua nesses lugares é um CPF
+    publicado, e mascarar na resposta da API depois não desfaz a publicação. A
+    supressão precisa acontecer na camada que os artefatos derivam.
+
+    **O que sai é o documento, não o nome.** A supressão é cirúrgica: apaga o run
+    de dígitos e deixa o resto da razão social intacto. `ALINE APARECIDA LEITE DE
+    SOUZA 22922853802` vira `ALINE APARECIDA LEITE DE SOUZA [NUMERO SUPRIMIDO]`.
+
+    Isto é julgamento, não consequência óbvia da regra, e as duas saídas divergem
+    por completo. Apagar o campo inteiro deixaria 5,2 milhões de empresas — 26% do
+    recorte — sem nome nenhum, e o grafo não serviria para elas. Não suprimir
+    publicaria o CPF.
+
+    A distinção que sustenta a escolha é que **CPF e razão social não são a mesma
+    coisa**. O CPF é identificador protegido, e a própria Receita o mascara em
+    `Socios`, em todo lugar onde teve a chance de mascarar. A razão social do
+    empresário individual é o nome **legal do negócio**: sai em nota fiscal, em
+    contrato e no cartão CNPJ. Tratar as duas igual custaria a utilidade sem
+    comprar privacidade nenhuma. Ver ADR-006.
+
+    Dois registros em 19,77 milhões ficam só com a marca, porque a razão social
+    inteira era o documento — `11954952746` e `018.066.169-80`, sem nome ao lado.
+    Não havia nome a preservar, e o desfecho é o certo.
+
+    **O custo dessa recusa foi medido, e é grande.** O CPF sem máscara da razão
+    social identificaria o dono de cada empresário individual, e o projeto recusa
+    usá-lo — ver a decisão registrada para o ADR. O preço: das 19.770.618
+    empresas do recorte de SP, **14.792.701 não têm nenhum sócio** em `Socios`,
+    porque o dono do empresário individual não está lá. São 74,8% de nós isolados,
+    que nenhum caminho societário jamais atravessa. A alternativa era extrair o
+    CPF da razão social e reidentificar milhões de pessoas a partir de um dado que
+    a Receita mascara em todo lugar onde teve a chance. Registrar o número é o que
+    transforma a recusa de retórica em decisão verificável.
+
+    **O orçamento de deploy é dos metadados, não do CSR.** A razão social de
+    19,77 milhões de empresas ocupa 323 MiB já comprimida, contra um teto de 500 MB
+    para o artefato inteiro; os arrays CSR são a parte pequena da conta. Excluir da
+    publicação os 14.792.701 nós sem vínculo deixa cerca de 5 milhões de empresas e
+    resolve o orçamento. A decisão sobre nós isolados, na Fase 4, não é otimização
+    de `indptr` — é o que torna a Fase 8 possível.
+    """
+    alvo = competencia or config.competencia
+    fonte = _fonte_de_empresas(config, alvo)
+    recorte = config.data_dir / "silver" / alvo / "recorte.parquet"
+    if not recorte.exists():
+        raise RecorteAusenteError(
+            f"Não há recorte em {recorte}. O recorte por UF define quais empresas entram, "
+            "e precisa ser aplicado antes da tipagem."
+        )
+
+    destino = recorte.with_name("empresas.parquet")
+    naturezas = config.data_dir / "bronze" / alvo / "naturezas.parquet"
+    qualificacoes = config.data_dir / "bronze" / alvo / "qualificacoes.parquet"
+
+    with abrir_conexao(config, config.data_dir / "duckdb-tmp") as conexao:
+        definir_macros(conexao)
+        # Ordem total e declarada: primeiro a linha com mais campos preenchidos,
+        # depois o próprio conteúdo como critério. Duas linhas que empatem em tudo
+        # são indistinguíveis, e qualquer uma delas dá o mesmo resultado — é o que
+        # torna a escolha determinística sem depender da ordem de leitura.
+        desempate = ", ".join(f"{coluna} NULLS LAST" for coluna in _COLUNAS_DE_CONTEUDO)
+        conexao.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE empresas AS
+            SELECT * EXCLUDE (posicao) FROM (
+              SELECT e.*,
+                     row_number() OVER (
+                       PARTITION BY e.cnpj_basico
+                       ORDER BY {_campos_preenchidos()} DESC, {desempate}
+                     ) AS posicao,
+                     count(*) OVER (PARTITION BY e.cnpj_basico) AS linhas_do_cnpj
+              FROM {fonte} e
+              SEMI JOIN read_parquet('{recorte.as_posix()}') r USING (cnpj_basico)
+            ) WHERE posicao = 1
+            """
+        )
+
+        malformados = conexao.execute(
+            "SELECT count(*), min(capital_social) FROM empresas "
+            f"WHERE capital_social IS NOT NULL AND NOT regexp_matches(capital_social, "
+            f"'{FORMATO_DO_CAPITAL}')"
+        ).fetchone()
+        if malformados and int(malformados[0]):
+            raise CapitalSocialMalformadoError(
+                f"{int(malformados[0]):,} registros têm capital_social fora de "
+                f"{FORMATO_DO_CAPITAL}, o primeiro deles {malformados[1]!r}. Converter assim "
+                "mesmo devolveria nulo em silêncio, e capital nulo é indistinguível de "
+                "capital zero em tudo o que vier depois."
+            )
+
+        ausentes = conexao.execute(
+            f"SELECT count(*) FROM read_parquet('{recorte.as_posix()}') r "
+            "ANTI JOIN empresas e USING (cnpj_basico)"
+        ).fetchone()
+        if ausentes and int(ausentes[0]):
+            raise EmpresaAusenteError(
+                f"{int(ausentes[0]):,} cnpj_basico do recorte não têm linha em Empresas. O "
+                "recorte define o universo do projeto, e empresa que existe como "
+                "estabelecimento mas não como empresa quebra essa definição."
+            )
+
+        parcial = destino.with_name(f"{destino.name}.parcial")
+        conexao.execute(
+            f"COPY (SELECT cnpj_basico, "
+            f"  {_suprimir_documentos('razao_social')} AS razao_social, "
+            f"  natureza_juridica, "
+            f"  n.descricao AS natureza_juridica_descricao, "
+            f"  qualificacao_do_responsavel, "
+            f"  q.descricao AS qualificacao_do_responsavel_descricao, "
+            f"  CAST(replace(capital_social, ',', '.') AS DECIMAL(18,2)) AS capital_social, "
+            f"  porte, "
+            f"  {_descricao_de_porte()} AS porte_descricao, "
+            f"  ente_federativo_responsavel "
+            f"FROM empresas e "
+            f"LEFT JOIN read_parquet('{naturezas.as_posix()}') n ON n.codigo = e.natureza_juridica "
+            f"LEFT JOIN read_parquet('{qualificacoes.as_posix()}') q "
+            f"  ON q.codigo = e.qualificacao_do_responsavel "
+            f"ORDER BY cnpj_basico) "
+            f"TO '{parcial.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+
+        medidas = conexao.execute(
+            f"SELECT count(*), "
+            f"  count(*) FILTER (WHERE linhas_do_cnpj > 1), "
+            f"  count(*) FILTER (WHERE razao_social IS NOT NULL "
+            f"    AND {_suprimir_documentos('razao_social')} <> razao_social), "
+            f"  count(*) FILTER (WHERE capital_social IS NULL), "
+            f"  count(*) FILTER (WHERE {_descricao_de_porte()} IS NULL) "
+            f"FROM empresas"
+        ).fetchone()
+        registros, repetidos, suprimidas, sem_capital, sem_porte = (
+            tuple(int(valor) for valor in medidas) if medidas else (0, 0, 0, 0, 0)
+        )
+
+        sem_natureza = conexao.execute(
+            f"SELECT count(*) FROM empresas e ANTI JOIN "
+            f"read_parquet('{naturezas.as_posix()}') n ON n.codigo = e.natureza_juridica"
+        ).fetchone()
+        sem_descricao = int(sem_natureza[0]) if sem_natureza else 0
+
+        sem_qualificacao = conexao.execute(
+            f"SELECT count(*) FROM empresas e ANTI JOIN "
+            f"read_parquet('{qualificacoes.as_posix()}') q "
+            f"ON q.codigo = e.qualificacao_do_responsavel"
+        ).fetchone()
+        sem_qualificacao_descricao = int(sem_qualificacao[0]) if sem_qualificacao else 0
+
+        try:
+            validar_cnpj_basico_unico(conexao, parcial)
+        except ErroDeSilver:
+            parcial.unlink(missing_ok=True)
+            raise
+
+    parcial.replace(destino)
+
+    logger.info(
+        "empresas tipadas",
+        extra={
+            "competencia": alvo,
+            "uf_alvo": config.uf_alvo,
+            "registros": registros,
+            "cnpj_basico_repetidos": repetidos,
+            "razoes_sociais_suprimidas": suprimidas,
+            "capital_ausente": sem_capital,
+            "natureza_sem_descricao": sem_descricao,
+            "qualificacao_sem_descricao": sem_qualificacao_descricao,
+            "porte_sem_descricao": sem_porte,
+            "arquivo": destino.name,
+            "bytes_parquet": destino.stat().st_size,
+        },
+    )
+    return EmpresasTipadas(
+        caminho=destino,
+        registros=registros,
+        cnpj_basico_repetidos=repetidos,
+        razoes_sociais_suprimidas=suprimidas,
+        capital_ausente=sem_capital,
+        natureza_sem_descricao=sem_descricao,
+        qualificacao_sem_descricao=sem_qualificacao_descricao,
+        porte_sem_descricao=sem_porte,
     )
