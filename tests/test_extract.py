@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -138,6 +139,158 @@ def test_espaco_suficiente_nao_levanta(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- extração
+
+
+# ------------------------------------------------------------------ transcodificação
+
+
+ACENTUADO = '"01";"AÇÃO SÃO JOÃO";"0002";"\x8f"\n'
+
+
+def test_saida_e_utf8_e_o_conteudo_sobrevive(config_local: Config) -> None:
+    criar_zip(
+        pasta_bruto(config_local) / "Naturezas.zip", {"F.NATJUCSV": ACENTUADO.encode("latin-1")}
+    )
+
+    extraidos = extrair_competencia(config_local)
+
+    bytes_de_saida = extraidos[0].read_bytes()
+    assert bytes_de_saida == ACENTUADO.encode("utf-8")
+    assert bytes_de_saida.decode("utf-8") == ACENTUADO
+    # O 0x8F solto, que o DuckDB recusava, vira a sequência válida C2 8F.
+    assert b"\xc2\x8f" in bytes_de_saida
+    assert b"\x8f" not in bytes_de_saida.replace(b"\xc2\x8f", b"")
+
+
+def test_transcodificacao_e_reversivel(config_local: Config) -> None:
+    """latin-1 para UTF-8 é bijeção: a volta devolve exatamente os bytes de origem."""
+    original = bytes(range(256)).replace(b"\n", b" ").replace(b'"', b" ").replace(b";", b" ")
+    criar_zip(pasta_bruto(config_local) / "Paises.zip", {"F.PAISCSV": original})
+
+    extraidos = extrair_competencia(config_local)
+
+    assert extraidos[0].read_bytes().decode("utf-8").encode("latin-1") == original
+
+
+def test_bloco_a_bloco_nao_corta_caractere(
+    config_local: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Com blocos minúsculos o resultado tem de ser idêntico: latin-1 é de byte único."""
+    conteudo = ('"01";"ÇÃO ÁÉÍÓÚ àéíóú"\n' * 500).encode("latin-1")
+    criar_zip(pasta_bruto(config_local) / "Cnaes.zip", {"F.CNAECSV": conteudo})
+    monkeypatch.setattr(extract, "_BLOCO", 7)
+
+    extraidos = extrair_competencia(config_local)
+
+    assert extraidos[0].read_bytes() == conteudo.decode("latin-1").encode("utf-8")
+
+
+def test_crc_divergente_e_denunciado_como_zip_corrompido(config_local: Config) -> None:
+    """CRC separa 'descomprimi errado' de 'transcodifiquei errado'."""
+    caminho = pasta_bruto(config_local) / "Motivos.zip"
+    with zipfile.ZipFile(caminho, "w", zipfile.ZIP_STORED) as arquivo:
+        arquivo.writestr("F.MOTICSV", CONTEUDO)
+
+    # Sem compressão os bytes do membro estão literais no arquivo: trocar um deles
+    # deixa a descompressão funcionar e o CRC declarado deixar de bater, que é
+    # exatamente a corrupção que o teste precisa provocar.
+    bruto = bytearray(caminho.read_bytes())
+    posicao = bruto.index(CONTEUDO[:40])
+    bruto[posicao] = bruto[posicao] ^ 0xFF
+    caminho.write_bytes(bruto)
+
+    with pytest.raises(extract.CrcDivergenteError, match="corrompido"):
+        extrair_competencia(config_local)
+
+    assert not (pasta_extraido(config_local) / "Motivos.csv").exists()
+
+
+def test_manifesto_declara_a_codificacao_e_o_crc(config_local: Config) -> None:
+    criar_zip(pasta_bruto(config_local) / "Cnaes.zip", {"F.CNAECSV": CONTEUDO})
+
+    extrair_competencia(config_local)
+
+    conteudo = json.loads((pasta_extraido(config_local) / NOME_DO_MANIFESTO).read_text("utf-8"))
+    entrada = conteudo["arquivos"]["Cnaes.csv"]
+    assert entrada["codificacao"] == "utf-8"
+    assert re.fullmatch(r"[0-9a-f]{8}", entrada["crc32_origem"])
+    assert entrada["sha256"] == hashlib.sha256(CONTEUDO).hexdigest()
+    assert "transcodificado" in conteudo["sha256_descreve"]
+
+
+def test_extracao_em_codificacao_antiga_e_refeita(config_local: Config) -> None:
+    """Manifesto sem codificação declarada é de antes da transcodificação."""
+    criar_zip(pasta_bruto(config_local) / "Paises.zip", {"F.PAISCSV": ACENTUADO.encode("latin-1")})
+    extrair_competencia(config_local)
+
+    saida = pasta_extraido(config_local) / "Paises.csv"
+    saida.write_bytes(ACENTUADO.encode("latin-1"))
+    registro = extract.carregar_manifesto(pasta_extraido(config_local), "2026-06")
+    antiga = registro.entradas["Paises.csv"]
+    registro.entradas["Paises.csv"] = extract.EntradaExtraida(
+        nome=antiga.nome,
+        origem=antiga.origem,
+        membro_original=antiga.membro_original,
+        tamanho=len(ACENTUADO.encode("latin-1")),
+        sha256=antiga.sha256,
+        extraido_em=antiga.extraido_em,
+    )
+    extract.gravar_manifesto(registro, pasta_extraido(config_local))
+
+    extrair_competencia(config_local)
+
+    assert saida.read_bytes() == ACENTUADO.encode("utf-8")
+
+
+def test_margem_de_espaco_cobre_o_crescimento_da_transcodificacao() -> None:
+    assert extract.MARGEM_DE_TRANSCODIFICACAO > 1.0413  # pior crescimento medido no real
+
+
+def test_espaco_desconta_a_extracao_anterior_que_sera_substituida() -> None:
+    """Sem o desconto, reextrair num disco que já contém o resultado seria recusado."""
+    declarado = 20_000_000_000
+    maior = 6_000_000_000
+
+    do_zero = extract.espaco_necessario(declarado, reaproveitavel=0, maior_pendente=maior)
+    substituindo = extract.espaco_necessario(
+        declarado, reaproveitavel=declarado, maior_pendente=maior
+    )
+
+    assert do_zero > declarado
+    assert substituindo < do_zero
+    # Sobram duas parcelas: o crescimento da transcodificação, porque os arquivos
+    # novos são maiores que os que serão apagados, e o pico transitório do maior,
+    # cujo .parcial convive com a versão antiga até a renomeação.
+    crescimento = int(declarado * extract.MARGEM_DE_TRANSCODIFICACAO) - declarado
+    transitorio = int(maior * extract.MARGEM_DE_TRANSCODIFICACAO)
+    assert substituindo == crescimento + transitorio
+
+
+def test_espaco_nunca_desce_abaixo_do_pico_transitorio() -> None:
+    """Mesmo descontando tudo, o maior arquivo precisa caber duas vezes."""
+    necessario = extract.espaco_necessario(1_000, reaproveitavel=10**12, maior_pendente=5_000)
+    assert necessario == int(5_000 * extract.MARGEM_DE_TRANSCODIFICACAO)
+
+
+def test_reextracao_completa_passa_na_checagem_de_espaco(config_local: Config) -> None:
+    """Reextrair sobre o resultado anterior não pode ser recusado por falta de espaço."""
+    criar_zip(pasta_bruto(config_local) / "Cnaes.zip", {"F.CNAECSV": CONTEUDO})
+    extrair_competencia(config_local)
+
+    registro = extract.carregar_manifesto(pasta_extraido(config_local), "2026-06")
+    antiga = registro.entradas["Cnaes.csv"]
+    registro.entradas["Cnaes.csv"] = extract.EntradaExtraida(
+        nome=antiga.nome,
+        origem=antiga.origem,
+        membro_original=antiga.membro_original,
+        tamanho=antiga.tamanho,
+        sha256=antiga.sha256,
+        extraido_em=antiga.extraido_em,
+        codificacao="latin-1",
+    )
+    extract.gravar_manifesto(registro, pasta_extraido(config_local))
+
+    assert extrair_competencia(config_local)
 
 
 def test_extrai_com_nome_previsivel_e_conteudo_intacto(config_local: Config) -> None:

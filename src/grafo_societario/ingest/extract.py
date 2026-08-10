@@ -22,6 +22,13 @@ perigoso é recusado inteiro, porque nome assim não acontece por acaso.
 por expressão regular obrigaria a mudar o padrão todo mês. A saída vira
 `Estabelecimentos0.csv`, e o nome original é preservado no manifesto, onde serve
 à rastreabilidade sem contaminar o resto do pipeline.
+
+**A saída é UTF-8, não os bytes originais.** O leitor de CSV do DuckDB recusa a
+faixa de controle C1 (`0x80` a `0x9F`) ao ler como latin-1, e a competência real
+tem o byte `0x8F` em três dos trinta e seis arquivos — o que faria ele recusar
+8,9 GiB inteiros. A transcodificação de latin-1 para UTF-8 é bijetiva: todo byte de `0x00`
+a `0xFF` tem um e apenas um ponto de código correspondente, e a volta é exata.
+Muda a representação, não o conteúdo — a fidelidade do bronze é sobre conteúdo.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import hashlib
 import logging
 import shutil
 import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -45,6 +53,17 @@ logger = logging.getLogger(__name__)
 NOME_DO_MANIFESTO: Final = "manifesto-extracao.json"
 _BLOCO: Final = 1024 * 1024
 
+CODIFICACAO_ORIGEM: Final = "latin-1"
+CODIFICACAO_DESTINO: Final = "utf-8"
+
+# Cada byte >= 0x80 vira dois em UTF-8. Medido na competência 2026-06: os arquivos
+# grandes crescem quase nada (Estabelecimentos0 tem 0,004% de bytes altos, Socios0
+# tem um único byte em 200 MiB), e o pior caso são as tabelas de domínio, com
+# 4,13%. A margem de 10% dá mais que o dobro da folga do pior caso medido, e
+# existe porque a checagem de espaço usa o tamanho declarado no ZIP — que descreve
+# a saída em latin-1, não a transcodificada.
+MARGEM_DE_TRANSCODIFICACAO: Final = 1.10
+
 
 class ErroDeExtracao(RuntimeError):
     """Falha ao extrair os arquivos da Receita Federal."""
@@ -58,9 +77,20 @@ class EspacoInsuficienteError(ErroDeExtracao):
     """Não há espaço em disco para o conteúdo descomprimido."""
 
 
+class CrcDivergenteError(ErroDeExtracao):
+    """O conteúdo descomprimido não bate com o CRC declarado no ZIP."""
+
+
 @dataclass(frozen=True)
 class EntradaExtraida:
-    """Um arquivo extraído, com a origem preservada."""
+    """Um arquivo extraído, com a origem preservada.
+
+    Os dois campos de verificação descrevem coisas diferentes de propósito:
+    `crc32_origem` é o CRC que o ZIP declara para o membro, e portanto valida a
+    descompressão; `sha256` é calculado sobre o arquivo **já transcodificado**, e
+    portanto valida o que está em disco. Sem essa separação, um erro de
+    transcodificação seria indistinguível de um ZIP corrompido.
+    """
 
     nome: str
     origem: str
@@ -68,6 +98,8 @@ class EntradaExtraida:
     tamanho: int
     sha256: str
     extraido_em: str
+    codificacao: str = ""
+    crc32_origem: str = ""
 
 
 @dataclass
@@ -100,10 +132,16 @@ def gravar_manifesto(registro: ManifestoDeExtracao, destino: Path) -> Path:
     conteudo: dict[str, Any] = {
         "competencia": registro.competencia,
         "gerado_em": datetime.now(tz=UTC).isoformat(timespec="seconds"),
+        "sha256_descreve": (
+            f"o arquivo já transcodificado para {CODIFICACAO_DESTINO}, não o membro "
+            f"do ZIP. A integridade da descompressão é o crc32_origem."
+        ),
         "arquivos": {
             nome: {
                 "origem": entrada.origem,
                 "membro_original": entrada.membro_original,
+                "codificacao": entrada.codificacao,
+                "crc32_origem": entrada.crc32_origem,
                 "tamanho": entrada.tamanho,
                 "sha256": entrada.sha256,
                 "extraido_em": entrada.extraido_em,
@@ -163,14 +201,42 @@ def medir_descomprimido(zips: list[Path]) -> dict[Path, int]:
     return medidas
 
 
-def verificar_espaco(destino: Path, necessario: int) -> None:
-    """Falha antes de começar quando o disco não comporta a extração."""
+def espaco_necessario(declarado: int, reaproveitavel: int, maior_pendente: int) -> int:
+    """Espaço adicional que a extração de fato exige.
+
+    Três parcelas. O que será escrito vem do tamanho declarado no ZIP mais a
+    margem da transcodificação. O que uma extração anterior ocupa **volta a ficar
+    livre**, porque cada arquivo é substituído pelo seu sucessor. E o pico
+    transitório do maior arquivo não volta: o `.parcial` dele coexiste com a
+    versão antiga até a renomeação.
+
+    Sem descontar o reaproveitável, reextrair sobre um disco que já contém o
+    resultado seria recusado por falta de espaço que não é necessário.
+    """
+    a_escrever = int(declarado * MARGEM_DE_TRANSCODIFICACAO)
+    transitorio = int(maior_pendente * MARGEM_DE_TRANSCODIFICACAO)
+    return max(a_escrever - reaproveitavel + transitorio, transitorio)
+
+
+def verificar_espaco(
+    destino: Path, declarado: int, reaproveitavel: int = 0, maior_pendente: int = 0
+) -> None:
+    """Falha antes de começar quando o disco não comporta a extração.
+
+    O tamanho vem do diretório central do ZIP e descreve o conteúdo em latin-1.
+    A saída é UTF-8 e é maior: sem a margem, a checagem passaria e a extração
+    falharia no fim, que é exatamente o que ela existe para impedir.
+    """
+    necessario = espaco_necessario(declarado, reaproveitavel, maior_pendente)
     livre = shutil.disk_usage(destino).free
     if necessario <= livre:
         logger.info(
             "espaço conferido antes da extração",
             extra={
+                "declarado_bytes": declarado,
+                "reaproveitavel_bytes": reaproveitavel,
                 "necessario_bytes": necessario,
+                "margem": MARGEM_DE_TRANSCODIFICACAO,
                 "livre_bytes": livre,
                 "folga_bytes": livre - necessario,
             },
@@ -179,7 +245,9 @@ def verificar_espaco(destino: Path, necessario: int) -> None:
 
     faltam = necessario - livre
     raise EspacoInsuficienteError(
-        f"A extração precisa de {necessario / 1024**3:.2f} GiB e há "
+        f"A extração precisa de {necessario / 1024**3:.2f} GiB "
+        f"({declarado / 1024**3:.2f} GiB declarados no ZIP mais "
+        f"{(MARGEM_DE_TRANSCODIFICACAO - 1):.0%} de margem para a transcodificação) e há "
         f"{livre / 1024**3:.2f} GiB livres em {destino}. "
         f"Faltam {faltam / 1024**3:.2f} GiB ({faltam:,} bytes). "
         "Libere espaço, aponte DATA_DIR para outro disco, ou desligue MANTER_ZIP "
@@ -191,6 +259,15 @@ def _ja_serve_o_que_esta_em_disco(
     destino: Path, entrada: EntradaExtraida | None, modo: ModoDeVerificacao
 ) -> bool:
     if entrada is None:
+        return False
+    if entrada.codificacao != CODIFICACAO_DESTINO:
+        # Extração anterior à transcodificação: o arquivo em disco está em latin-1
+        # e o manifesto não sabe disso. Reaproveitá-lo entregaria ao bronze um
+        # arquivo com codificação diferente da que ele espera.
+        logger.info(
+            "extração anterior usava outra codificação; será refeita",
+            extra={"arquivo": entrada.nome, "codificacao_registrada": entrada.codificacao or "?"},
+        )
         return False
     local = destino / entrada.nome
     if not local.exists() or local.stat().st_size != entrada.tamanho:
@@ -215,26 +292,59 @@ def _falta_extrair(
 
 def _extrair_membro(
     arquivo: zipfile.ZipFile, membro: zipfile.ZipInfo, alvo: Path
-) -> tuple[int, str]:
-    """Copia um membro em blocos, calculando o hash no mesmo passe."""
+) -> tuple[int, str, str]:
+    """Copia um membro em blocos, transcodificando de latin-1 para UTF-8.
+
+    A transcodificação pode ser feita bloco a bloco sem cuidado com fronteira de
+    caractere porque latin-1 é de byte único: todo byte é um caractere completo, e
+    nenhum caractere atravessa o limite de um bloco. Em UTF-8 isso não valeria.
+
+    Três verificações saem do mesmo passe, e cada uma responde por uma coisa:
+    o CRC-32 valida a descompressão contra o que o ZIP declara; o tamanho lido
+    valida que o membro veio inteiro; o SHA-256 descreve o arquivo transcodificado
+    que ficou em disco. Separadas assim, um erro de transcodificação não se
+    disfarça de ZIP corrompido.
+    """
     parcial = alvo.with_name(f"{alvo.name}.parcial")
     digestor = hashlib.sha256()
-    escritos = 0
+    crc = 0
+    lidos = escritos = 0
 
-    with arquivo.open(membro) as origem, parcial.open("wb") as saida:
-        while bloco := origem.read(_BLOCO):
-            saida.write(bloco)
-            digestor.update(bloco)
-            escritos += len(bloco)
+    try:
+        with arquivo.open(membro) as origem, parcial.open("wb") as saida:
+            while bloco := origem.read(_BLOCO):
+                crc = zlib.crc32(bloco, crc)
+                lidos += len(bloco)
+                transcodificado = bloco.decode(CODIFICACAO_ORIGEM).encode(CODIFICACAO_DESTINO)
+                saida.write(transcodificado)
+                digestor.update(transcodificado)
+                escritos += len(transcodificado)
+    except zipfile.BadZipFile as erro:
+        # O próprio zipfile confere o CRC ao esgotar o membro e reclama antes da
+        # conferência daqui. A mensagem dele não distingue as duas causas, e é
+        # justamente a distinção que interessa a quem for depurar.
+        parcial.unlink(missing_ok=True)
+        raise CrcDivergenteError(
+            f"{membro.filename} não descomprimiu íntegro: {erro}. O arquivo comprimido "
+            "está corrompido — isto não é erro de transcodificação, que é verificada "
+            "em separado pelo SHA-256."
+        ) from erro
 
-    if membro.file_size and escritos != membro.file_size:
+    if membro.file_size and lidos != membro.file_size:
         parcial.unlink(missing_ok=True)
         raise ErroDeExtracao(
-            f"{membro.filename} rendeu {escritos} bytes contra {membro.file_size} declarados"
+            f"{membro.filename} rendeu {lidos} bytes contra {membro.file_size} declarados"
+        )
+    if crc != membro.CRC:
+        parcial.unlink(missing_ok=True)
+        raise CrcDivergenteError(
+            f"{membro.filename} descomprimiu com CRC-32 {crc:08x}, mas o ZIP declara "
+            f"{membro.CRC:08x}. O arquivo comprimido está corrompido — isto não é erro "
+            "de transcodificação, que é verificada em separado pelo SHA-256."
         )
 
     parcial.replace(alvo)
-    return escritos, digestor.hexdigest()
+    return escritos, digestor.hexdigest(), f"{crc:08x}"
 
 
 def extrair_arquivo(
@@ -255,7 +365,7 @@ def extrair_arquivo(
                 extraidos.append(alvo)
                 continue
 
-            tamanho, sha256 = _extrair_membro(arquivo, membro, alvo)
+            tamanho, sha256, crc32 = _extrair_membro(arquivo, membro, alvo)
             registro.registrar(
                 EntradaExtraida(
                     nome=nome,
@@ -264,6 +374,8 @@ def extrair_arquivo(
                     tamanho=tamanho,
                     sha256=sha256,
                     extraido_em=datetime.now(tz=UTC).isoformat(timespec="seconds"),
+                    codificacao=CODIFICACAO_DESTINO,
+                    crc32_origem=crc32,
                 )
             )
             gravar_manifesto(registro, destino)
@@ -300,10 +412,22 @@ def extrair_competencia(
     registro = carregar_manifesto(destino, alvo)
     medidas = medir_descomprimido(zips)
 
-    # O espaço é conferido só contra o que ainda falta extrair: exigir os 23,24 GiB
-    # inteiros numa reexecução recusaria um disco que já contém o resultado.
+    # O espaço é conferido só contra o que ainda falta extrair, descontando o que
+    # uma extração anterior desses mesmos ZIPs já ocupa e vai liberar.
     pendentes = [caminho for caminho in zips if _falta_extrair(registro, destino, caminho, modo)]
-    verificar_espaco(destino, sum(medidas[caminho] for caminho in pendentes))
+    de_pendentes = {caminho.name for caminho in pendentes}
+    reaproveitavel = 0
+    for registrada in registro.entradas.values():
+        anterior = destino / registrada.nome
+        if registrada.origem in de_pendentes and anterior.exists():
+            reaproveitavel += anterior.stat().st_size
+
+    verificar_espaco(
+        destino,
+        declarado=sum(medidas[caminho] for caminho in pendentes),
+        reaproveitavel=reaproveitavel,
+        maior_pendente=max((medidas[caminho] for caminho in pendentes), default=0),
+    )
 
     logger.info(
         "extração iniciada",
