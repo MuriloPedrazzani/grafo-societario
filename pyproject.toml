@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "grafo-societario"
+description = "Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Murilo Pedrazzani", email = "murilopedrazzani@gmail.com" }]
+keywords = ["cnpj", "grafo", "dados-abertos", "receita-federal", "societario"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Private :: Do Not Upload",
+]
+dynamic = ["version"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Repository = "https://github.com/MuriloPedrazzani/grafo-societario"
+
+[tool.hatch.version]
+path = "src/grafo_societario/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/grafo_societario"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
