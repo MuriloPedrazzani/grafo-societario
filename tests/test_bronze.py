@@ -367,6 +367,109 @@ def test_converter_principais_gera_as_tres_tabelas(competencia_extraida: Config)
     assert all(caminho.exists() for caminhos in resultado.values() for caminho in caminhos)
 
 
+# ------------------------------------------------- tabelas de decodificação
+
+
+DOMINIO = ("Cnaes", "Motivos", "Municipios", "Naturezas", "Paises", "Qualificacoes")
+
+
+@pytest.fixture
+def dominio_extraido(tmp_path: Path) -> Config:
+    config = Config(competencia="2026-06", data_dir=tmp_path)
+    bruto = tmp_path / "bruto" / "2026-06"
+    bruto.mkdir(parents=True, exist_ok=True)
+    for nome in DOMINIO:
+        with zipfile.ZipFile(bruto / f"{nome}.zip", "w", zipfile.ZIP_DEFLATED) as arquivo:
+            arquivo.writestr(
+                f"F.K03200$Z.D60613.{nome[:5].upper()}", (FIXTURES / f"{nome}.csv").read_bytes()
+            )
+    extrair_competencia(config)
+    return config
+
+
+def gravar_dominio(config: Config, nome: str, linhas: str) -> None:
+    """Escreve um CSV de domínio direto no extraído, já em UTF-8.
+
+    Aqui não se deriva de fixture: estes casos são dados malformados de propósito,
+    e fixture existe para descrever o que a fonte tem, não o que ela poderia ter.
+    """
+    destino = config.data_dir / "extraido" / "2026-06"
+    destino.mkdir(parents=True, exist_ok=True)
+    (destino / f"{nome}.csv").write_text(linhas, encoding="utf-8")
+
+
+def test_as_seis_tabelas_de_dominio_convertem(dominio_extraido: Config) -> None:
+    resultado = bronze.converter_dominio(dominio_extraido)
+
+    assert set(resultado) == {nome.lower() for nome in DOMINIO}
+    with duckdb.connect() as conexao:
+        for nome, caminhos in resultado.items():
+            descricao = conexao.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{caminhos[0].as_posix()}')"
+            ).fetchall()
+            assert tuple(coluna[0] for coluna in descricao) == ("codigo", "descricao"), nome
+            assert {coluna[1] for coluna in descricao} == {"VARCHAR"}, nome
+
+
+def test_codigo_duplicado_e_recusado(tmp_path: Path) -> None:
+    """Código repetido não faz o join falhar — faz multiplicar linha."""
+    config = Config(competencia="2026-06", data_dir=tmp_path)
+    gravar_dominio(config, "Qualificacoes", '"05";"Administrador"\n"05";"Administradora"\n')
+
+    with pytest.raises(bronze.CodigoDuplicadoError, match="multiplica linha"):
+        bronze.converter_tabela(
+            config,
+            bronze.Tabela("qualificacoes", "Qualificacoes", bronze.COLUNAS_DOMINIO),
+            validacoes=bronze.VALIDACOES_DE_DOMINIO,
+        )
+
+    destino = config.data_dir / "bronze" / "2026-06"
+    assert not (destino / "qualificacoes.parquet").exists()
+    assert not list(destino.glob("*.parcial"))
+
+
+@pytest.mark.parametrize("descricao", ['""', '"   "'])
+def test_descricao_vazia_e_recusada(tmp_path: Path, descricao: str) -> None:
+    """Decodificar para vazio some do relatório; não decodificar ao menos aparece."""
+    config = Config(competencia="2026-06", data_dir=tmp_path)
+    gravar_dominio(config, "Motivos", f'"01";"Extinção"\n"02";{descricao}\n')
+
+    with pytest.raises(bronze.DescricaoVaziaError, match="'02'"):
+        bronze.converter_tabela(
+            config,
+            bronze.Tabela("motivos", "Motivos", bronze.COLUNAS_DOMINIO),
+            validacoes=bronze.VALIDACOES_DE_DOMINIO,
+        )
+
+    assert not (config.data_dir / "bronze" / "2026-06" / "motivos.parquet").exists()
+
+
+def test_tabela_de_dominio_integra_passa(tmp_path: Path) -> None:
+    """Controle positivo da validação: ela precisa aceitar o caso bom."""
+    config = Config(competencia="2026-06", data_dir=tmp_path)
+    gravar_dominio(config, "Paises", '"105";"BRASIL"\n"249";"ESTADOS UNIDOS"\n')
+
+    gerados = bronze.converter_tabela(
+        config,
+        bronze.Tabela("paises", "Paises", bronze.COLUNAS_DOMINIO),
+        validacoes=bronze.VALIDACOES_DE_DOMINIO,
+    )
+
+    assert gerados[0].exists()
+
+
+def test_converter_tudo_gera_as_nove_tabelas(
+    competencia_extraida: Config, dominio_extraido: Config
+) -> None:
+    """As duas fixtures compartilham o mesmo diretório, então o extraído tem as nove."""
+    assert competencia_extraida.data_dir == dominio_extraido.data_dir
+
+    resultado = bronze.converter_tudo(competencia_extraida)
+
+    assert len(resultado) == 9
+    assert all(caminhos for caminhos in resultado.values())
+
+
 def test_contagem_do_csv_usa_as_colunas_declaradas(competencia_extraida: Config) -> None:
     extraido = competencia_extraida.data_dir / "extraido" / "2026-06" / "Estabelecimentos0.csv"
     config = competencia_extraida

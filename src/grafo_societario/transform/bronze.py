@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -130,11 +131,20 @@ class Tabela:
     colunas: tuple[str, ...]
 
 
+COLUNAS_DOMINIO: Final = ("codigo", "descricao")
+"""As duas colunas de toda tabela de decodificação. Ver docs/layout_rfb.md."""
+
 ESTABELECIMENTOS: Final = Tabela("estabelecimentos", "Estabelecimentos", COLUNAS_ESTABELECIMENTOS)
 EMPRESAS: Final = Tabela("empresas", "Empresas", COLUNAS_EMPRESAS)
 SOCIOS: Final = Tabela("socios", "Socios", COLUNAS_SOCIOS)
 
 TABELAS_PRINCIPAIS: Final = (ESTABELECIMENTOS, EMPRESAS, SOCIOS)
+
+TABELAS_DE_DOMINIO: Final = tuple(
+    Tabela(prefixo.lower(), prefixo, COLUNAS_DOMINIO)
+    for prefixo in ("Cnaes", "Motivos", "Municipios", "Naturezas", "Paises", "Qualificacoes")
+)
+"""As seis tabelas de decodificação. Minúsculas em volume, decisivas em efeito."""
 
 # O Parquet destes dados sai bem menor que o CSV, mas a checagem de espaço não pode
 # depender disso: assumir que ele cabe no mesmo tamanho da entrada é o limite
@@ -152,6 +162,14 @@ class ContagemDivergenteError(ErroDeBronze):
 
 class EspacoInsuficienteError(ErroDeBronze):
     """Não há espaço em disco para o Parquet."""
+
+
+class CodigoDuplicadoError(ErroDeBronze):
+    """Uma tabela de decodificação tem código repetido."""
+
+
+class DescricaoVaziaError(ErroDeBronze):
+    """Uma tabela de decodificação tem descrição ausente ou em branco."""
 
 
 def abrir_conexao(config: Config, temporarios: Path) -> duckdb.DuckDBPyConnection:
@@ -214,11 +232,63 @@ def verificar_espaco(destino: Path, tamanho_da_entrada: int) -> None:
     )
 
 
+Validacao = Callable[[duckdb.DuckDBPyConnection, Path], None]
+
+
+def validar_codigo_unico(conexao: duckdb.DuckDBPyConnection, caminho: Path) -> None:
+    """Recusa tabela de decodificação com código repetido.
+
+    Um código duplicado não faz o join falhar: faz ele **multiplicar linha**. Uma
+    empresa com qualificação repetida na tabela vira duas empresas no resultado, e
+    o sintoma aparece três fases adiante como contagem inflada, longe da causa.
+    """
+    duplicados = conexao.execute(
+        f"SELECT codigo, count(*) AS quantas FROM read_parquet('{caminho.as_posix()}') "
+        "GROUP BY codigo HAVING count(*) > 1 ORDER BY quantas DESC, codigo LIMIT 5"
+    ).fetchall()
+    if not duplicados:
+        return
+
+    amostra = ", ".join(f"{codigo!r} aparece {quantas}x" for codigo, quantas in duplicados)
+    raise CodigoDuplicadoError(
+        f"{caminho.name} tem código repetido: {amostra}. Uma tabela de decodificação com "
+        "código duplicado multiplica linha em todo join que a usar, e o efeito só aparece "
+        "muito depois, como contagem inflada sem causa aparente."
+    )
+
+
+def validar_descricao_preenchida(conexao: duckdb.DuckDBPyConnection, caminho: Path) -> None:
+    """Recusa descrição nula ou em branco.
+
+    Decodificar para vazio é pior que não decodificar: o código some do relatório
+    sem deixar rastro, em vez de aparecer como código não traduzido.
+    """
+    vazias = conexao.execute(
+        f"SELECT codigo FROM read_parquet('{caminho.as_posix()}') "
+        "WHERE descricao IS NULL OR trim(descricao) = '' ORDER BY codigo LIMIT 5"
+    ).fetchall()
+    if not vazias:
+        return
+
+    amostra = ", ".join(repr(codigo) for (codigo,) in vazias)
+    raise DescricaoVaziaError(
+        f"{caminho.name} tem descrição vazia nos códigos {amostra}. Decodificar para vazio "
+        "apaga o código do relatório, enquanto não decodificar ao menos o deixa visível."
+    )
+
+
+VALIDACOES_DE_DOMINIO: Final[tuple[Validacao, ...]] = (
+    validar_codigo_unico,
+    validar_descricao_preenchida,
+)
+
+
 def converter_para_parquet(
     conexao: duckdb.DuckDBPyConnection,
     origem: Path,
     destino: Path,
     colunas: tuple[str, ...],
+    validacoes: tuple[Validacao, ...] = (),
 ) -> tuple[int, int]:
     """Converte um CSV em Parquet e devolve (registros, bytes do Parquet).
 
@@ -247,11 +317,25 @@ def converter_para_parquet(
             "registro: confira o tratamento de aspas e de quebra de linha dentro de campo."
         )
 
+    # As validações rodam sobre o parcial: uma tabela que as reprova nunca chega a
+    # existir com o nome definitivo, e portanto nunca é lida por engano.
+    for validacao in validacoes:
+        try:
+            validacao(conexao, parcial)
+        except ErroDeBronze:
+            parcial.unlink(missing_ok=True)
+            raise
+
     parcial.replace(destino)
     return registros_no_parquet, destino.stat().st_size
 
 
-def converter_tabela(config: Config, tabela: Tabela, competencia: str | None = None) -> list[Path]:
+def converter_tabela(
+    config: Config,
+    tabela: Tabela,
+    competencia: str | None = None,
+    validacoes: tuple[Validacao, ...] = (),
+) -> list[Path]:
     """Converte todas as partições de uma tabela da competência.
 
     Os três arquivos principais diferem apenas no layout, e é por isso que só as
@@ -277,7 +361,7 @@ def converter_tabela(config: Config, tabela: Tabela, competencia: str | None = N
         for origem in origens:
             saida = destino / f"{origem.stem.lower()}.parquet"
             registros, bytes_do_parquet = converter_para_parquet(
-                conexao, origem, saida, tabela.colunas
+                conexao, origem, saida, tabela.colunas, validacoes
             )
             bytes_da_origem = origem.stat().st_size
             logger.info(
@@ -322,8 +406,27 @@ def converter_socios(config: Config, competencia: str | None = None) -> list[Pat
     return converter_tabela(config, SOCIOS, competencia)
 
 
+def converter_dominio(config: Config, competencia: str | None = None) -> dict[str, list[Path]]:
+    """Converte as seis tabelas de decodificação, com validação de integridade.
+
+    Elas somam menos de 100 KB e são as mais importantes de conferir. Todo join do
+    silver passa por aqui: um código duplicado multiplica linha e uma descrição
+    vazia apaga o código do relatório. Nos dois casos o efeito aparece longe da
+    causa, então a checagem tem de ser aqui, onde a causa está.
+    """
+    return {
+        tabela.nome: converter_tabela(config, tabela, competencia, VALIDACOES_DE_DOMINIO)
+        for tabela in TABELAS_DE_DOMINIO
+    }
+
+
 def converter_principais(config: Config, competencia: str | None = None) -> dict[str, list[Path]]:
     """Converte Estabelecimentos, Empresas e Socios."""
     return {
         tabela.nome: converter_tabela(config, tabela, competencia) for tabela in TABELAS_PRINCIPAIS
     }
+
+
+def converter_tudo(config: Config, competencia: str | None = None) -> dict[str, list[Path]]:
+    """Converte as três tabelas principais e as seis de decodificação."""
+    return {**converter_principais(config, competencia), **converter_dominio(config, competencia)}
