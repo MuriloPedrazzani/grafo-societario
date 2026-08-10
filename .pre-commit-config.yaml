@@ -25,3 +25,8 @@ repos:
       - id: mypy
         args: [--config-file=pyproject.toml]
         pass_filenames: false
+        # O hook roda num ambiente isolado: sem isto o mypy não enxerga os tipos
+        # que o pydantic publica e passaria a tratar a configuração como Any.
+        additional_dependencies:
+          - pydantic-settings>=2.7
+          - pytest>=8.0

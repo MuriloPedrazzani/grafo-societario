@@ -17,7 +17,9 @@ classifiers = [
     "Private :: Do Not Upload",
 ]
 dynamic = ["version"]
-dependencies = []
+dependencies = [
+    "pydantic-settings>=2.7",
+]
 
 [project.optional-dependencies]
 dev = [
