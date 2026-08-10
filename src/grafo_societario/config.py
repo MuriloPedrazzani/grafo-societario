@@ -113,6 +113,12 @@ class Config(ConexaoRfb):
     data_dir: Path = Path("data")
     """Raiz onde os dados baixados e processados são gravados."""
 
+    limite_de_memoria: str = "4GB"
+    """Teto de memória do motor de ETL. O projeto promete rodar em 8 GiB, e numa
+    máquina de 8 GiB reais sobram cinco a seis depois do sistema — o processo
+    Python ainda ocupa parte disso. Quatro deixa folga para os dois e mantém a
+    promessa verdadeira na máquina que ela descreve, não só na de quem a escreveu."""
+
     manter_zip: bool = True
     """Preserva o ZIP depois de extrair. Descartar libera disco, mas destrói o
     cache de download: a execução seguinte rebaixaria 6,79 GiB da Receita para
