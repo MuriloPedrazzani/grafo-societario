@@ -1,5 +1,7 @@
 # Grafo Societário
 
+[![CI](https://github.com/MuriloPedrazzani/grafo-societario/actions/workflows/ci.yml/badge.svg)](https://github.com/MuriloPedrazzani/grafo-societario/actions/workflows/ci.yml)
+
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
 > **Status:** em desenvolvimento — Fase 0 de 9. Este README é atualizado a cada fase concluída.
