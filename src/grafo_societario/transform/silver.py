@@ -47,6 +47,8 @@ toda execução.
 
 from __future__ import annotations
 
+import calendar
+import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -113,6 +115,10 @@ class CapitalSocialMalformadoError(ErroDeSilver):
 
 class EmpresaAusenteError(ErroDeSilver):
     """Um `cnpj_basico` do recorte não tem linha em Empresas."""
+
+
+class VinculoPerdidoError(ErroDeSilver):
+    """A tabela de sócios saiu com menos vínculos do que entrou."""
 
 
 class CnpjBasicoDuplicadoError(ErroDeSilver):
@@ -687,4 +693,318 @@ def tipar_empresas(config: Config, competencia: str | None = None) -> EmpresasTi
         natureza_sem_descricao=sem_descricao,
         qualificacao_sem_descricao=sem_qualificacao_descricao,
         porte_sem_descricao=sem_porte,
+    )
+
+
+# ----------------------------------------------------------------------- sócios
+
+PREENCHEDOR_DE_DOCUMENTO: Final = "***000000**"
+"""Máscara sem documento por trás, no campo `representante_legal`.
+
+Ela ocupa **8.439.366 dos 8.699.764 vínculos** do recorte de SP — 97% — e em todos
+eles `nome_representante` vem vazio. A correspondência é perfeita: onde há
+preenchedor não há nome, e onde há documento há nome. Não é representante sem
+documento; é vínculo sem representante nenhum.
+
+O silver converte para nulo, e o motivo é a Fase 4. Um identificador só vale como
+identidade se distinguir, e este não distingue nada: tratá-lo como documento
+fundiria 8,4 milhões de representantes inexistentes num único nó, ligado a quase
+todo o grafo. Seria o pior tipo de erro deste projeto — não uma falha, mas um
+resultado plausível e falso.
+"""
+
+DESCRICAO_DE_IDENTIFICADOR_DE_SOCIO: Final = {
+    "1": "Pessoa jurídica",
+    "2": "Pessoa física",
+    "3": "Estrangeiro",
+}
+"""Ver `docs/layout_rfb.md`. Os três valores foram conferidos contra o arquivo."""
+
+DESCRICAO_DE_FAIXA_ETARIA: Final = {
+    "0": "Não se aplica",
+    "1": "0 a 12 anos",
+    "2": "13 a 20 anos",
+    "3": "21 a 30 anos",
+    "4": "31 a 40 anos",
+    "5": "41 a 50 anos",
+    "6": "51 a 60 anos",
+    "7": "61 a 70 anos",
+    "8": "71 a 80 anos",
+    "9": "Acima de 80 anos",
+}
+"""Faixa etária não tem tabela de decodificação, como porte. Os dez códigos
+aparecem no recorte de SP, e nenhum outro."""
+
+PISO_DE_ENTRADA: Final = dt.date(1900, 1, 1)
+"""Abaixo disto a data não descreve entrada em sociedade nenhuma.
+
+A fonte traz `00210823` — ano 21 — e o `try_strptime` aceita sem reclamar, porque
+o ano 21 existe no calendário. É um registro em 8,7 milhões, e o piso existe para
+que ele vire nulo contado em vez de sócio que entrou na sociedade sob Tibério."""
+
+COLUNAS_SILVER_SOCIOS: Final = (
+    "cnpj_basico",
+    "identificador_socio",
+    "identificador_socio_descricao",
+    "nome_socio_ou_razao_social",
+    "cnpj_cpf_socio",
+    "qualificacao_socio",
+    "qualificacao_socio_descricao",
+    "data_entrada_sociedade",
+    "pais",
+    "pais_descricao",
+    "representante_legal",
+    "nome_representante",
+    "qualificacao_representante_legal",
+    "qualificacao_representante_legal_descricao",
+    "faixa_etaria",
+    "faixa_etaria_descricao",
+)
+"""O esquema publicável de sócios. Socios não tem coluna de contato na origem, e a
+lista é explícita para que acrescentar uma seja decisão visível."""
+
+
+@dataclass(frozen=True)
+class SociosTipados:
+    """O que a tipagem de sócios produziu, com o que precisou ser decidido."""
+
+    caminho: Path
+
+    vinculos: int
+    """Uma linha por vínculo. São as arestas do grafo da Fase 4."""
+
+    por_tipo: tuple[tuple[str, int], ...]
+    """Contagem por `identificador_socio`. Dimensiona os nós antes de construí-los."""
+
+    nomes_suprimidos: int
+    representantes_sem_documento: int
+    datas_invalidas: int
+
+    qualificacao_socio_sem_descricao: int
+    qualificacao_representante_sem_descricao: int
+    pais_sem_descricao: int
+    """Códigos **preenchidos** que a tabela de domínio não tem. Ausência é contada
+    à parte, em `pais_ausente`: um campo vazio não é um código que falhou em casar,
+    e somar os dois afoga o sinal — em país, 971 códigos inexistentes ficariam
+    escondidos atrás de 8,65 milhões de vínculos que simplesmente não têm país."""
+
+    pais_ausente: int
+
+
+def contar(conexao: duckdb.DuckDBPyConnection, fonte: str) -> int:
+    """Conta registros de uma tabela ou de uma cláusula de leitura.
+
+    Existe como função nomeada, e não como consulta inline, para que a suíte
+    consiga fazê-la mentir: guarda que nunca reprovou não provou que sabe reprovar.
+    """
+    resultado = conexao.execute(f"SELECT count(*) FROM {fonte}").fetchone()
+    return int(resultado[0]) if resultado else -1
+
+
+def _descricao_por_codigo(coluna: str, legenda: dict[str, str]) -> str:
+    """CASE que decodifica enumeração sem tabela na fonte. Código novo vira nulo."""
+    ramos = " ".join(f"WHEN '{codigo}' THEN '{texto}'" for codigo, texto in legenda.items())
+    return f"CASE {coluna} {ramos} ELSE NULL END"
+
+
+def _ultimo_dia_da_competencia(competencia: str) -> dt.date:
+    """Teto da data de entrada: sócio não entra depois de a competência fechar."""
+    ano, mes = (int(parte) for parte in competencia.split("-"))
+    return dt.date(ano, mes, calendar.monthrange(ano, mes)[1])
+
+
+FORMATO_DA_DATA: Final = r"^[0-9]{8}$"
+"""Oito dígitos, `AAAAMMDD`. Casou em 100% dos 8.699.764 vínculos do recorte.
+
+A conferência de largura **não** é redundante com a conversão. `try_strptime`
+aceita `'2015031'`, sete dígitos, e devolve 2015-03-01: engole o dígito que falta
+e entrega uma data plausível, sem erro e sem nulo. É a pior forma de conversão
+silenciosa, porque o resultado parece certo."""
+
+
+def _data_de_entrada(coluna: str, teto: dt.date) -> str:
+    """Converte para DATE e anula o que não for data plausível.
+
+    Três coisas caem no mesmo ramo e são contadas juntas: largura errada, valor que
+    o `try_strptime` recusa, e data fora da faixa. Conversão silenciosa de data é o
+    descarte mais fácil de não perceber, porque nada no resultado indica que havia
+    um valor ali — por isso o nulo é contado, e não apenas produzido.
+    """
+    convertida = f"try_strptime({coluna}, '%Y%m%d')::DATE"
+    return (
+        f"CASE WHEN regexp_matches({coluna}, '{FORMATO_DA_DATA}') "
+        f"AND {convertida} BETWEEN DATE '{PISO_DE_ENTRADA}' AND DATE '{teto}' "
+        f"THEN {convertida} ELSE NULL END"
+    )
+
+
+def tipar_socios(config: Config, competencia: str | None = None) -> SociosTipados:
+    """Tipa, decodifica e suprime documento da tabela de sócios do recorte.
+
+    Esta é a tabela com mais superfície de dado pessoal do projeto, e é de onde
+    saem as arestas do grafo. As duas coisas ao mesmo tempo é o que a torna
+    delicada: cada linha é um vínculo societário e uma pessoa.
+
+    **O que a medição encontrou, e que o PDF não garantia.** O documento afirma
+    que sócio e representante vêm descaracterizados, e desta vez ele acerta: os
+    8.424.780 CPF de pessoa física e os 8.699.764 de representante estão **todos**
+    mascarados, sem uma exceção, e o estrangeiro não traz documento nenhum. A
+    conferência foi feita porque o mesmo PDF já errou três vezes sobre este
+    arquivo, não porque houvesse suspeita.
+
+    **O detector de CPF foi apontado para os campos de nome, e não deu zero.**
+    `nome_socio_ou_razao_social` traz três CPF válidos — em registros tipados como
+    pessoa jurídica, onde ninguém iria procurar. Foi assim que `razao_social` se
+    revelou, e a lição é a mesma: campo chamado "nome" não contém só nome. A regra
+    do commit 16 se aplica aqui inteira. `nome_representante` deu zero, mas zero
+    **medido**, que é o que permite afirmá-lo.
+
+    **Nenhum vínculo se perde.** A contagem é conferida antes e depois. Divergir
+    significa que um join descartou aresta, e aresta descartada em silêncio é
+    caminho societário que deixa de existir sem ninguém saber que existia — o modo
+    de falha que a Fase 5 não teria como detectar.
+    """
+    alvo = competencia or config.competencia
+    fonte = _fonte_do_bronze(config, alvo, "socios")
+    recorte = config.data_dir / "silver" / alvo / "recorte.parquet"
+    if not recorte.exists():
+        raise RecorteAusenteError(
+            f"Não há recorte em {recorte}. O recorte por UF define quais vínculos entram, "
+            "e precisa ser aplicado antes da tipagem."
+        )
+
+    destino = recorte.with_name("socios.parquet")
+    qualificacoes = config.data_dir / "bronze" / alvo / "qualificacoes.parquet"
+    paises = config.data_dir / "bronze" / alvo / "paises.parquet"
+    teto = _ultimo_dia_da_competencia(alvo)
+    tipo_de_socio = _descricao_por_codigo(
+        "s.identificador_socio", DESCRICAO_DE_IDENTIFICADOR_DE_SOCIO
+    )
+    faixa = _descricao_por_codigo("s.faixa_etaria", DESCRICAO_DE_FAIXA_ETARIA)
+
+    with abrir_conexao(config, config.data_dir / "duckdb-tmp") as conexao:
+        definir_macros(conexao)
+        conexao.execute(
+            f"CREATE OR REPLACE TEMP TABLE socios AS SELECT s.* FROM {fonte} s "
+            f"SEMI JOIN read_parquet('{recorte.as_posix()}') r USING (cnpj_basico)"
+        )
+        vinculos = contar(conexao, "socios")
+
+        parcial = destino.with_name(f"{destino.name}.parcial")
+        conexao.execute(
+            f"""
+            COPY (
+              SELECT
+                s.cnpj_basico,
+                s.identificador_socio,
+                {tipo_de_socio} AS identificador_socio_descricao,
+                suprimir_documentos(s.nome_socio_ou_razao_social) AS nome_socio_ou_razao_social,
+                s.cnpj_cpf_socio,
+                s.qualificacao_socio,
+                qs.descricao AS qualificacao_socio_descricao,
+                {_data_de_entrada("s.data_entrada_sociedade", teto)} AS data_entrada_sociedade,
+                s.pais,
+                p.descricao AS pais_descricao,
+                nullif(s.representante_legal, '{PREENCHEDOR_DE_DOCUMENTO}') AS representante_legal,
+                suprimir_documentos(nullif(trim(coalesce(s.nome_representante, '')), ''))
+                  AS nome_representante,
+                s.qualificacao_representante_legal,
+                qr.descricao AS qualificacao_representante_legal_descricao,
+                s.faixa_etaria,
+                {faixa} AS faixa_etaria_descricao
+              FROM socios s
+              LEFT JOIN read_parquet('{qualificacoes.as_posix()}') qs
+                ON qs.codigo = s.qualificacao_socio
+              LEFT JOIN read_parquet('{qualificacoes.as_posix()}') qr
+                ON qr.codigo = s.qualificacao_representante_legal
+              LEFT JOIN read_parquet('{paises.as_posix()}') p ON p.codigo = s.pais
+              ORDER BY ALL
+            ) TO '{parcial.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+        )
+
+        gravados = contar(conexao, f"read_parquet('{parcial.as_posix()}')")
+        if gravados != vinculos:
+            parcial.unlink(missing_ok=True)
+            raise VinculoPerdidoError(
+                f"Entraram {vinculos:,} vínculos e saíram {gravados:,}. Algum join descartou "
+                "aresta, e aresta descartada em silêncio é caminho societário que deixa de "
+                "existir sem ninguém saber que existia. Confira as decodificações: toda "
+                "junção com tabela de domínio precisa ser LEFT."
+            )
+
+        medidas = conexao.execute(
+            f"""
+            SELECT
+              count(*) FILTER (
+                WHERE nome_socio_ou_razao_social IS NOT NULL
+                  AND suprimir_documentos(nome_socio_ou_razao_social)
+                      <> nome_socio_ou_razao_social),
+              count(*) FILTER (WHERE representante_legal = '{PREENCHEDOR_DE_DOCUMENTO}'),
+              count(*) FILTER (
+                WHERE {_data_de_entrada("data_entrada_sociedade", teto)} IS NULL)
+            FROM socios
+            """
+        ).fetchone()
+        suprimidos, sem_representante, datas_invalidas = (
+            tuple(int(valor) for valor in medidas) if medidas else (0, 0, 0)
+        )
+
+        por_tipo = tuple(
+            (str(codigo), int(quantos))
+            for codigo, quantos in conexao.execute(
+                "SELECT identificador_socio, count(*) FROM socios GROUP BY 1 ORDER BY 1"
+            ).fetchall()
+        )
+
+        def sem_correspondencia(coluna: str, tabela: Path) -> int:
+            """Códigos preenchidos que a tabela de domínio não tem.
+
+            O `IS NOT NULL` não é detalhe: sem ele, um campo vazio entra na conta
+            como se fosse código órfão, e o número deixa de medir o que promete.
+            """
+            resultado = conexao.execute(
+                f"SELECT count(*) FROM socios s ANTI JOIN read_parquet('{tabela.as_posix()}') d "
+                f"ON d.codigo = s.{coluna} WHERE s.{coluna} IS NOT NULL"
+            ).fetchone()
+            return int(resultado[0]) if resultado else 0
+
+        sem_qualificacao = sem_correspondencia("qualificacao_socio", qualificacoes)
+        sem_representante_descricao = sem_correspondencia(
+            "qualificacao_representante_legal", qualificacoes
+        )
+        sem_pais = sem_correspondencia("pais", paises)
+        pais_ausente = contar(conexao, "socios WHERE pais IS NULL")
+
+    parcial.replace(destino)
+
+    logger.info(
+        "sócios tipados",
+        extra={
+            "competencia": alvo,
+            "uf_alvo": config.uf_alvo,
+            "vinculos": vinculos,
+            "por_tipo": dict(por_tipo),
+            "nomes_suprimidos": suprimidos,
+            "representantes_sem_documento": sem_representante,
+            "datas_invalidas": datas_invalidas,
+            "qualificacao_socio_sem_descricao": sem_qualificacao,
+            "qualificacao_representante_sem_descricao": sem_representante_descricao,
+            "pais_sem_descricao": sem_pais,
+            "pais_ausente": pais_ausente,
+            "arquivo": destino.name,
+            "bytes_parquet": destino.stat().st_size,
+        },
+    )
+    return SociosTipados(
+        caminho=destino,
+        vinculos=vinculos,
+        por_tipo=por_tipo,
+        nomes_suprimidos=suprimidos,
+        representantes_sem_documento=sem_representante,
+        datas_invalidas=datas_invalidas,
+        qualificacao_socio_sem_descricao=sem_qualificacao,
+        qualificacao_representante_sem_descricao=sem_representante_descricao,
+        pais_sem_descricao=sem_pais,
+        pais_ausente=pais_ausente,
     )

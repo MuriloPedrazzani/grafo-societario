@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import logging
 import zipfile
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,26 +24,32 @@ from grafo_societario.transform.bronze import (
     COLUNAS_DOMINIO,
     COLUNAS_EMPRESAS,
     COLUNAS_ESTABELECIMENTOS,
+    COLUNAS_SOCIOS,
     VALIDACOES_DE_DOMINIO,
     Tabela,
     converter_empresas,
     converter_estabelecimentos,
+    converter_socios,
     converter_tabela,
 )
 from grafo_societario.transform.silver import (
     COLUNAS_SILVER_EMPRESAS,
+    COLUNAS_SILVER_SOCIOS,
     MARCA_DE_SUPRESSAO,
     PADRAO_DE_CPF_PARTIDO,
     PADROES_DE_DOCUMENTO,
+    PREENCHEDOR_DE_DOCUMENTO,
     BronzeAusenteError,
     CapitalSocialMalformadoError,
     CnpjBasicoDuplicadoError,
     EmpresaAusenteError,
     RecorteAusenteError,
     RecorteVazioError,
+    VinculoPerdidoError,
     aplicar_recorte_por_uf,
     definir_macros,
     tipar_empresas,
+    tipar_socios,
     validar_cnpj_basico_unico,
 )
 from test_fixtures import cpf_valido
@@ -963,3 +970,385 @@ def test_tipagem_sem_recorte_e_recusada(config_de_silver: Config) -> None:
 
     with pytest.raises(RecorteAusenteError, match="antes da tipagem"):
         tipar_empresas(config_de_silver)
+
+
+# ============================================================= sócios tipados
+
+
+PAISES_PADRAO = {"105": "BRASIL", "249": "ESTADOS UNIDOS"}
+
+MASCARA_DE_CPF = "***456789**"
+
+
+def gravar_socios(config: Config, registros: list[dict[str, str]]) -> None:
+    _gravar_csv(config, "Socios0", COLUNAS_SOCIOS, registros)
+    converter_socios(config)
+
+
+def socio(
+    cnpj_basico: str,
+    *,
+    tipo: str = "2",
+    nome: str = "JOAO DA SILVA",
+    documento: str = MASCARA_DE_CPF,
+    qualificacao: str = "49",
+    entrada: str = "20150312",
+    pais: str = "",
+    representante: str = PREENCHEDOR_DE_DOCUMENTO,
+    nome_representante: str = "",
+    qualificacao_representante: str = "00",
+    faixa_etaria: str = "5",
+) -> dict[str, str]:
+    return {
+        "cnpj_basico": cnpj_basico,
+        "identificador_socio": tipo,
+        "nome_socio_ou_razao_social": nome,
+        "cnpj_cpf_socio": documento,
+        "qualificacao_socio": qualificacao,
+        "data_entrada_sociedade": entrada,
+        "pais": pais,
+        "representante_legal": representante,
+        "nome_representante": nome_representante,
+        "qualificacao_representante_legal": qualificacao_representante,
+        "faixa_etaria": faixa_etaria,
+    }
+
+
+def preparar_socios(
+    config: Config,
+    registros: list[dict[str, str]],
+    *,
+    qualificacoes: dict[str, str] | None = None,
+    paises: dict[str, str] | None = None,
+    no_recorte: list[str] | None = None,
+) -> None:
+    cnpjs = no_recorte if no_recorte is not None else [r["cnpj_basico"] for r in registros]
+    gravar_estabelecimentos(config, [estabelecimento(c) for c in dict.fromkeys(cnpjs)])
+    aplicar_recorte_por_uf(config)
+    gravar_socios(config, registros)
+    _gravar_dominio(config, "Qualificacoes", qualificacoes or QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", paises or PAISES_PADRAO)
+
+
+def ler_socios(caminho: Path) -> list[dict[str, object]]:
+    with duckdb.connect() as conexao:
+        conexao.execute(f"CREATE VIEW s AS SELECT * FROM read_parquet('{caminho.as_posix()}')")
+        colunas = [linha[0] for linha in conexao.execute("DESCRIBE s").fetchall()]
+        return [
+            dict(zip(colunas, linha, strict=True))
+            for linha in conexao.execute("SELECT * FROM s ORDER BY ALL").fetchall()
+        ]
+
+
+# ----------------------------------------------- documento e dado pessoal
+
+
+def test_mascara_do_cpf_do_socio_atravessa_intacta(config_de_silver: Config) -> None:
+    """A máscara é o que a Receita publica, e o silver não a desfaz nem a apaga.
+
+    Ela é a base da identidade do commit 19: seis dígitos visíveis. Apagá-la aqui
+    tornaria pessoa física indistinguível de pessoa física.
+    """
+    preparar_socios(config_de_silver, [socio("11111111", tipo="2", documento=MASCARA_DE_CPF)])
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["cnpj_cpf_socio"] == MASCARA_DE_CPF
+    assert linha["identificador_socio_descricao"] == "Pessoa física"
+
+
+def test_cpf_escondido_em_nome_de_socio_e_suprimido(config_de_silver: Config) -> None:
+    """Três CPF válidos vivem em `nome_socio_ou_razao_social` no recorte de SP, em
+    registros tipados como pessoa jurídica — onde ninguém iria procurar.
+
+    Campo chamado "nome" não contém só nome. Foi assim que `razao_social` se
+    revelou, e é por isso que o detector é apontado para cá também.
+    """
+    preparar_socios(
+        config_de_silver,
+        [
+            socio("11111111", tipo="1", nome="CAMILA MIRANDA DA COSTA BORBA 66701910220"),
+            socio("22222222", tipo="1", nome="1000691963 ONTARIO INC."),
+        ],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    linhas = ler_socios(resultado.caminho)
+    nomes = {str(linha["nome_socio_ou_razao_social"]) for linha in linhas}
+    assert nomes == {
+        f"CAMILA MIRANDA DA COSTA BORBA {MARCA_DE_SUPRESSAO}",
+        f"{MARCA_DE_SUPRESSAO} ONTARIO INC.",
+    }
+    assert resultado.nomes_suprimidos == 2
+
+
+def test_nome_de_socio_sem_documento_permanece(config_de_silver: Config) -> None:
+    """Controle negativo: a supressão precisa saber não agir."""
+    preparar_socios(config_de_silver, [socio("11111111", nome="MARIA APARECIDA DE SOUZA")])
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["nome_socio_ou_razao_social"] == "MARIA APARECIDA DE SOUZA"
+    assert resultado.nomes_suprimidos == 0
+
+
+def test_preenchedor_de_representante_vira_nulo(config_de_silver: Config) -> None:
+    """97% dos vínculos trazem `***000000**` com nome vazio: é ausência, não documento.
+
+    Se este teste passar a falhar, 8,4 milhões de representantes inexistentes
+    voltam a compartilhar um identificador — e na Fase 4 viram um único nó ligado
+    a quase todo o grafo, com aparência de resultado.
+    """
+    preparar_socios(
+        config_de_silver,
+        [
+            socio("11111111", representante=PREENCHEDOR_DE_DOCUMENTO, nome_representante=""),
+            socio("22222222", representante="***123456**", nome_representante="ANA LIMA"),
+        ],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    por_cnpj = {str(linha["cnpj_basico"]): linha for linha in ler_socios(resultado.caminho)}
+    assert por_cnpj["11111111"]["representante_legal"] is None
+    assert por_cnpj["11111111"]["nome_representante"] is None
+    assert por_cnpj["22222222"]["representante_legal"] == "***123456**"
+    assert por_cnpj["22222222"]["nome_representante"] == "ANA LIMA"
+    assert resultado.representantes_sem_documento == 1
+
+
+def test_estrangeiro_nao_tem_documento_e_isso_e_preservado(config_de_silver: Config) -> None:
+    """Terceiro caminho de identidade: sobra nome e país. Ver ADR-004."""
+    preparar_socios(
+        config_de_silver,
+        [socio("11111111", tipo="3", nome="JOHN SMITH", documento="", pais="249")],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["cnpj_cpf_socio"] is None
+    assert linha["identificador_socio_descricao"] == "Estrangeiro"
+    assert linha["pais_descricao"] == "ESTADOS UNIDOS"
+
+
+# ------------------------------------------------------------------- data
+
+
+def test_data_de_entrada_vira_date(config_de_silver: Config) -> None:
+    preparar_socios(config_de_silver, [socio("11111111", entrada="20150312")])
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["data_entrada_sociedade"] == date(2015, 3, 12)
+    assert resultado.datas_invalidas == 0
+
+
+@pytest.mark.parametrize(
+    ("entrada", "motivo"),
+    [
+        ("00210823", "ano 21, que o try_strptime aceita sem reclamar"),
+        ("00000000", "data zerada"),
+        ("20261231", "depois do fim da competência"),
+        ("2015031", "menos de oito dígitos"),
+    ],
+)
+def test_data_impossivel_vira_nulo_contado(
+    config_de_silver: Config, entrada: str, motivo: str
+) -> None:
+    """Conversão silenciosa de data é o descarte mais fácil de não perceber: nada
+    no resultado indica que havia um valor ali. Por isso o nulo é contado."""
+    preparar_socios(
+        config_de_silver,
+        [socio("11111111", entrada=entrada), socio("22222222", entrada="20150312")],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    por_cnpj = {str(linha["cnpj_basico"]): linha for linha in ler_socios(resultado.caminho)}
+    assert por_cnpj["11111111"]["data_entrada_sociedade"] is None, motivo
+    assert por_cnpj["22222222"]["data_entrada_sociedade"] == date(2015, 3, 12)
+    assert resultado.datas_invalidas == 1
+    assert resultado.vinculos == 2, "data inválida anula o campo, nunca descarta o vínculo"
+
+
+def test_data_no_ultimo_dia_da_competencia_e_valida(config_de_silver: Config) -> None:
+    """O teto é inclusivo. Sem este caso, o limite poderia estar um dia errado sem
+    nada acusar — e um dia errado descarta as entradas do último dia do mês."""
+    preparar_socios(config_de_silver, [socio("11111111", entrada="20260630")])
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["data_entrada_sociedade"] == date(2026, 6, 30)
+    assert resultado.datas_invalidas == 0
+
+
+# ------------------------------------------------- decodificação e vínculos
+
+
+def test_qualificacoes_sao_decodificadas_pelas_duas_pontas(config_de_silver: Config) -> None:
+    preparar_socios(
+        config_de_silver,
+        [
+            socio(
+                "11111111",
+                qualificacao="49",
+                representante="***123456**",
+                nome_representante="ANA LIMA",
+                qualificacao_representante="50",
+            )
+        ],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["qualificacao_socio_descricao"] == "Sócio-Administrador"
+    assert linha["qualificacao_representante_legal_descricao"] == "Empresário"
+    assert resultado.qualificacao_socio_sem_descricao == 0
+
+
+def test_codigo_de_dominio_ausente_nao_descarta_o_vinculo(config_de_silver: Config) -> None:
+    """A regra que o código 36 provou: join com tabela de domínio é LEFT e conta.
+
+    Um join interno aqui não erraria — apagaria a aresta, e o caminho societário
+    deixaria de existir sem nada acusar.
+    """
+    preparar_socios(
+        config_de_silver,
+        [socio("11111111", qualificacao="36", pais="999")],
+        qualificacoes={"49": "Sócio-Administrador"},
+        paises={"105": "BRASIL"},
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert resultado.vinculos == 1
+    assert linha["qualificacao_socio"] == "36"
+    assert linha["qualificacao_socio_descricao"] is None
+    assert linha["pais_descricao"] is None
+    assert resultado.qualificacao_socio_sem_descricao == 1
+    assert resultado.pais_sem_descricao == 1
+
+
+def test_pais_ausente_nao_conta_como_codigo_orfao(config_de_silver: Config) -> None:
+    """Campo vazio não é código que falhou em casar, e somar os dois afoga o sinal.
+
+    No recorte de SP são 971 códigos de país inexistentes contra 8,65 milhões de
+    vínculos sem país nenhum. Contados juntos, os 971 desaparecem.
+    """
+    preparar_socios(
+        config_de_silver,
+        [
+            socio("11111111", pais=""),
+            socio("22222222", pais="999"),
+            socio("33333333", pais="105"),
+        ],
+        paises={"105": "BRASIL"},
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    assert resultado.pais_ausente == 1
+    assert resultado.pais_sem_descricao == 1
+
+
+def test_vinculo_de_empresa_fora_do_recorte_nao_entra(config_de_silver: Config) -> None:
+    preparar_socios(
+        config_de_silver,
+        [socio("11111111"), socio("99999999")],
+        no_recorte=["11111111"],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    assert resultado.vinculos == 1
+    assert [linha["cnpj_basico"] for linha in ler_socios(resultado.caminho)] == ["11111111"]
+
+
+def test_contagem_por_tipo_dimensiona_os_nos(config_de_silver: Config) -> None:
+    preparar_socios(
+        config_de_silver,
+        [
+            socio("11111111", tipo="1", documento="12345678000199"),
+            socio("22222222", tipo="2"),
+            socio("33333333", tipo="2"),
+            socio("44444444", tipo="3", documento="", pais="249"),
+        ],
+    )
+
+    resultado = tipar_socios(config_de_silver)
+
+    assert dict(resultado.por_tipo) == {"1": 1, "2": 2, "3": 1}
+    assert resultado.vinculos == 4
+
+
+def test_faixa_etaria_e_decodificada(config_de_silver: Config) -> None:
+    preparar_socios(config_de_silver, [socio("11111111", faixa_etaria="5")])
+
+    resultado = tipar_socios(config_de_silver)
+
+    (linha,) = ler_socios(resultado.caminho)
+    assert linha["faixa_etaria"] == "5"
+    assert linha["faixa_etaria_descricao"] == "41 a 50 anos"
+
+
+def test_vinculo_perdido_interrompe_a_tipagem(
+    config_de_silver: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guarda exercitada contra um caso construído para reprovar.
+
+    Aresta descartada em silêncio é caminho societário que deixa de existir sem
+    ninguém saber que existia — e a Fase 5 não teria como detectar isso.
+    """
+    from grafo_societario.transform import silver
+
+    preparar_socios(config_de_silver, [socio("11111111"), socio("22222222")])
+    contagens = iter([10**9])
+
+    def contagem_mentirosa(*_: object, **__: object) -> int:
+        return next(contagens, 0)
+
+    monkeypatch.setattr(silver, "contar", contagem_mentirosa)
+
+    with pytest.raises(VinculoPerdidoError, match="deixa de existir"):
+        tipar_socios(config_de_silver)
+
+    destino = config_de_silver.data_dir / "silver" / "2026-06"
+    assert not (destino / "socios.parquet").exists()
+    assert not list(destino.glob("socios*.parcial"))
+
+
+def test_esquema_de_socios_e_exatamente_o_declarado(config_de_silver: Config) -> None:
+    preparar_socios(config_de_silver, [socio("11111111")])
+
+    resultado = tipar_socios(config_de_silver)
+
+    with duckdb.connect() as conexao:
+        descricao = conexao.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{resultado.caminho.as_posix()}')"
+        ).fetchall()
+    assert tuple(coluna[0] for coluna in descricao) == COLUNAS_SILVER_SOCIOS
+
+
+def test_socios_e_o_mesmo_byte_a_byte_entre_execucoes(config_de_silver: Config) -> None:
+    preparar_socios(config_de_silver, [socio("22222222"), socio("11111111")])
+
+    primeiro = tipar_socios(config_de_silver).caminho.read_bytes()
+    segundo = tipar_socios(config_de_silver).caminho.read_bytes()
+
+    assert primeiro == segundo
+
+
+def test_socios_sem_recorte_e_recusado(config_de_silver: Config) -> None:
+    gravar_estabelecimentos(config_de_silver, [estabelecimento("11111111")])
+    gravar_socios(config_de_silver, [socio("11111111")])
+
+    with pytest.raises(RecorteAusenteError, match="antes da tipagem"):
+        tipar_socios(config_de_silver)
