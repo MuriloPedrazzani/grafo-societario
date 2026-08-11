@@ -114,11 +114,13 @@ def estabelecimento(
     uf: str = "SP",
     matriz: bool = True,
     ordem: str = "0001",
+    dv: str = "00",
     situacao: str = "02",
 ) -> dict[str, str]:
     return {
         "cnpj_basico": cnpj_basico,
         "cnpj_ordem": ordem,
+        "cnpj_dv": dv,
         "identificador_matriz_filial": "1" if matriz else "2",
         "situacao_cadastral": situacao,
         "uf": uf,
@@ -269,6 +271,71 @@ def test_matriz_repetida_colapsa_e_e_contada(tmp_path: Path) -> None:
     # Desempate pelo menor cnpj_ordem: 0047 vem antes de 0051, e a escolha não
     # pode depender da ordem em que o motor leu as partições.
     assert dict((linha[0], linha[1]) for linha in linhas)["08314885"] == "02"
+
+
+def test_desempate_cai_para_o_dv_quando_a_ordem_empata(tmp_path: Path) -> None:
+    """O caso que `cnpj_ordem` sozinho não decide.
+
+    Na competência 2026-06 nenhum `cnpj_basico` repete a dupla, então a chave de
+    uma coluna bastava — por medição, não por garantia. Aqui a dupla empata, e sem
+    a segunda coluna qual situação sobrevive passaria a ser escolha do motor.
+    """
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(
+        config,
+        [
+            estabelecimento("11111111", ordem="0001", dv="98", situacao="08"),
+            estabelecimento("11111111", ordem="0001", dv="11", situacao="04"),
+        ],
+    )
+
+    recorte = aplicar_recorte_por_uf(config)
+
+    assert recorte.matrizes_repetidas == 1
+    assert ler_recorte(recorte.caminho) == [("11111111", "04", "SP")]
+
+
+def test_desempate_cai_para_a_situacao_quando_ordem_e_dv_empatam(tmp_path: Path) -> None:
+    """O último degrau da ordem total.
+
+    Se `cnpj_ordem` e `cnpj_dv` empatam, o critério passa a ser o próprio valor
+    escolhido. Empatando também nele, todos os candidatos são iguais e a resposta
+    é única por definição — não sobra caso indeterminado.
+    """
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(
+        config,
+        [
+            estabelecimento("11111111", ordem="0001", dv="98", situacao="08"),
+            estabelecimento("11111111", ordem="0001", dv="98", situacao="02"),
+        ],
+    )
+
+    recorte = aplicar_recorte_por_uf(config)
+
+    assert recorte.matrizes_repetidas == 1
+    assert ler_recorte(recorte.caminho) == [("11111111", "02", "SP")]
+
+
+def test_desempate_com_ordem_distinta_continua_pela_ordem(tmp_path: Path) -> None:
+    """A extensão só acrescenta degraus: onde a ordem já decidia, ela decide.
+
+    Sem isto, a chave nova poderia ter passado a escolher pela menor situação
+    também quando `cnpj_ordem` diverge — e o caso real de 08314885 mudaria de
+    resposta sem ninguém pedir.
+    """
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(
+        config,
+        [
+            estabelecimento("08314885", ordem="0047", dv="98", situacao="08"),
+            estabelecimento("08314885", ordem="0051", dv="74", situacao="02"),
+        ],
+    )
+
+    recorte = aplicar_recorte_por_uf(config)
+
+    assert ler_recorte(recorte.caminho) == [("08314885", "08", "SP")]
 
 
 def test_matriz_unica_nao_e_contada_como_repetida(tmp_path: Path) -> None:

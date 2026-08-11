@@ -30,10 +30,10 @@ defeito da fonte.
 em 68,6 milhões tem duas matrizes na competência 2026-06, e o mesmo registro
 aparece duas vezes em Empresas. É defeito da fonte, não do pipeline, e tratá-lo
 como erro fatal impediria o projeto de processar o dado que existe. Ele colapsa
-para uma linha, o desempate é pelo menor `cnpj_ordem` — determinístico, para o
-artefato ser o mesmo entre execuções — e a quantidade de casos vai para o log de
-toda execução, inclusive quando é zero. Colapso silencioso é o que não pode
-acontecer; colapso contado é aritmética honesta.
+para uma linha, por uma ordem total que não deixa caso para o motor decidir — ver
+`CHAVE_DE_DESEMPATE` —, e a quantidade de casos vai para o log de toda execução,
+inclusive quando é zero. Colapso silencioso é o que não pode acontecer; colapso
+contado é aritmética honesta.
 
 **Todo join com tabela de domínio é LEFT, e os não-casados são contados.** Vale
 para natureza jurídica, porte, qualificação, município, país e CNAE, sem exceção
@@ -66,6 +66,28 @@ Conferido contra a competência inteira: a coluna tem exatamente `'1'` e `'2'`,
 sem zero à esquerda. A coluna vizinha `situacao_cadastral` não tem essa sorte —
 o PDF oficial lista `2` onde o arquivo traz `02` —, e é por isso que a conferência
 foi feita em vez de deduzida do documento.
+"""
+
+CHAVE_DE_DESEMPATE: Final = "(cnpj_ordem, cnpj_dv, situacao_cadastral)"
+"""Ordem **total** entre as matrizes de um mesmo `cnpj_basico`.
+
+Na competência 2026-06 o único caso de matriz repetida tem `cnpj_ordem` distintos
+— `0047` e `0051` —, e nenhum dos 71,8 milhões de registros repete a dupla. Ou
+seja: hoje `cnpj_ordem` sozinho já decide.
+
+Hoje. Isso é propriedade **medida desta competência**, não garantida pela fonte, e
+a próxima não avisa quando quebrar. Com dois `cnpj_ordem` iguais o desempate por
+uma coluna só não desempata nada, e qual `situacao_cadastral` sobrevive passa a
+ser escolha do motor — podendo variar entre versões e entre execuções, o que
+quebra a imutabilidade que a Fase 8 promete sobre o artefato.
+
+A chave inclui `situacao_cadastral`, que é o próprio valor escolhido, e é isso
+que a torna total: se `cnpj_ordem` e `cnpj_dv` empatarem, vence a menor situação;
+se ela também empatar, todos os candidatos têm o mesmo valor e a resposta é única
+por definição. Não sobra caso em que o motor decida.
+
+Garantia por construção vence validação posterior — é o mesmo argumento que já
+sustenta a unicidade do recorte, aplicado ao desempate.
 """
 
 
@@ -190,7 +212,7 @@ def aplicar_recorte_por_uf(config: Config, competencia: str | None = None) -> Re
         conexao.execute(
             f"CREATE OR REPLACE TEMP TABLE recorte AS "
             f"SELECT cnpj_basico, "
-            f"       arg_min(situacao_cadastral, cnpj_ordem) AS situacao_cadastral, "
+            f"       arg_min(situacao_cadastral, {CHAVE_DE_DESEMPATE}) AS situacao_cadastral, "
             f"       min(uf) AS uf, "
             f"       count(*) AS matrizes "
             f"FROM {fonte} "
