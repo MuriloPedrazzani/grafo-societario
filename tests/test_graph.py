@@ -15,13 +15,22 @@ import pytest
 
 from grafo_societario.config import Config
 from grafo_societario.graph.build import (
+    COLUNAS_ARESTAS,
     COLUNAS_NOS,
+    ArestaPerdidaError,
     ExistenciaDesordenadaError,
+    ExtremoDesconhecidoError,
+    IndiceForaDaFaixaError,
     IndiceNaoDensoError,
+    NosAusentesError,
     SilverAusenteError,
+    gerar_arestas,
     gerar_nos,
+    validar_arestas_conservadas,
     validar_existencia_ordenada,
+    validar_extremos_conhecidos,
     validar_indice_denso,
+    validar_indice_na_faixa,
 )
 from grafo_societario.transform.identity import gerar_identidades, identificador
 from grafo_societario.transform.silver import (
@@ -435,3 +444,307 @@ def test_sem_silver_a_mensagem_diz_o_que_falta(tmp_path: Path) -> None:
 
     with pytest.raises(SilverAusenteError, match="recorte"):
         gerar_nos(config)
+
+
+# ------------------------------------------------------------------ arestas
+
+
+def ler_arestas(caminho: Path) -> list[tuple[int, int, str]]:
+    with duckdb.connect() as conexao:
+        return [
+            (int(empresa), int(socio), str(qualificacao))
+            for empresa, socio, qualificacao in conexao.execute(
+                f"SELECT no_empresa, no_socio, qualificacao_socio "
+                f"FROM read_parquet('{caminho.as_posix()}') "
+                "ORDER BY no_empresa, no_socio, qualificacao_socio"
+            ).fetchall()
+        ]
+
+
+def indice_por_identificador(caminho: Path) -> dict[str, int]:
+    """O índice como o consumidor o obtém: pela posição da linha no arquivo."""
+    return {str(linha["identificador"]): posicao for posicao, linha in enumerate(ler_nos(caminho))}
+
+
+def test_todo_vinculo_vira_aresta(silver: Config) -> None:
+    """A conservação é o critério de aceite: vínculo descartado em silêncio é
+    caminho societário que some sem deixar sintoma."""
+    gerar_nos(silver)
+
+    resultado = gerar_arestas(silver)
+
+    assert resultado.arestas == 3
+    assert len(ler_arestas(resultado.caminho)) == 3
+
+
+def test_aresta_liga_os_indices_dos_dois_nos(silver: Config) -> None:
+    """O caso que faz a regra compartilhada valer: `22222222` é nó por ser sócia
+    de `11111111`, e o índice do extremo tem de ser o mesmo nó."""
+    nos = gerar_nos(silver)
+    indice = indice_por_identificador(nos.caminho)
+
+    resultado = gerar_arestas(silver)
+
+    esperada = (indice[no_da_empresa("11111111")], indice[no_da_empresa("22222222")])
+    assert esperada in {(empresa, socio) for empresa, socio, _ in ler_arestas(resultado.caminho)}
+
+
+def test_empresa_de_fora_do_recorte_e_extremo_valido(silver: Config) -> None:
+    """O conector existe para não quebrar caminho real: duas paulistas ligadas por
+    uma holding de outra UF continuam ligadas."""
+    nos = gerar_nos(silver)
+    indice = indice_por_identificador(nos.caminho)
+
+    resultado = gerar_arestas(silver)
+
+    esperada = (indice[no_da_empresa("33333333")], indice[no_da_empresa("99999999")])
+    assert esperada in {(empresa, socio) for empresa, socio, _ in ler_arestas(resultado.caminho)}
+
+
+def test_qualificacao_acompanha_a_aresta(silver: Config) -> None:
+    """O CSR guarda só topologia. Sem esta coluna, a Fase 6 diria "fulano está
+    ligado a X" onde o produto é dizer "fulano é sócio-administrador de X"."""
+    gerar_nos(silver)
+
+    resultado = gerar_arestas(silver)
+
+    assert {qualificacao for _, _, qualificacao in ler_arestas(resultado.caminho)} == {"49"}
+
+
+def test_qualificacao_continua_texto(silver: Config) -> None:
+    """Código é texto, inclusive entre duas colunas de inteiro. Converter é
+    decisão da serialização, e ela tem de vir com asserção de que cabe no tipo."""
+    gerar_nos(silver)
+
+    resultado = gerar_arestas(silver)
+
+    with duckdb.connect() as conexao:
+        tipos = dict(
+            (str(coluna[0]), str(coluna[1]))
+            for coluna in conexao.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{resultado.caminho.as_posix()}')"
+            ).fetchall()
+        )
+    assert tipos["qualificacao_socio"] == "VARCHAR"
+    assert tipos["no_empresa"] == tipos["no_socio"] == "INTEGER"
+
+
+def test_esquema_das_arestas_e_o_declarado(silver: Config) -> None:
+    gerar_nos(silver)
+
+    resultado = gerar_arestas(silver)
+
+    with duckdb.connect() as conexao:
+        descricao = conexao.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{resultado.caminho.as_posix()}')"
+        ).fetchall()
+    assert tuple(coluna[0] for coluna in descricao) == COLUNAS_ARESTAS
+
+
+def test_a_ordem_e_a_que_o_csr_vai_percorrer(silver: Config) -> None:
+    """`ORDER BY no_empresa, no_socio` é o que permite montar `indptr` numa
+    passagem. A qualificação entra no desempate porque par se repete."""
+    gerar_nos(silver)
+
+    resultado = gerar_arestas(silver)
+
+    linhas = ler_arestas(resultado.caminho)
+    assert linhas == sorted(linhas)
+
+
+def test_as_arestas_sao_deterministicas(silver: Config) -> None:
+    """Mesmo silver e mesmos nós, mesmos bytes. Sem isso o artefato deixa de ser
+    imutável e o índice do commit anterior perde o sentido."""
+    gerar_nos(silver)
+    primeiro = gerar_arestas(silver)
+    bytes_das_arestas = primeiro.caminho.read_bytes()
+
+    segundo = gerar_arestas(silver)
+
+    assert segundo.caminho.read_bytes() == bytes_das_arestas
+
+
+# ------------------------------------ o que a serialização herda: laço e paralela
+
+
+@pytest.fixture
+def silver_com_laco_e_paralela(tmp_path: Path) -> Config:
+    """Uma empresa sócia de si mesma, e um par repetido em dois vínculos.
+
+    No recorte real são 9.049 laços e 56 pares paralelos. Os contadores precisam
+    provar que sabem devolver diferente de zero antes de o zero deles valer.
+    """
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(config, [estabelecimento(cnpj) for cnpj in ("11111111", "22222222")])
+    aplicar_recorte_por_uf(config)
+    gravar_empresas(
+        config,
+        [
+            empresa("11111111", razao_social="ALFA LTDA"),
+            empresa("22222222", razao_social="BRAVO LTDA"),
+        ],
+    )
+    _gravar_dominio(config, "Naturezas", NATUREZAS_PADRAO)
+    _gravar_dominio(config, "Qualificacoes", QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", PAISES_PADRAO)
+    tipar_empresas(config)
+    gravar_socios(
+        config,
+        [
+            # A empresa é sócia de si mesma.
+            socio("11111111", tipo="1", nome="ALFA LTDA", documento="11111111000199"),
+            # O mesmo par em dois vínculos, com a mesma qualificação.
+            socio("22222222", nome="FULANO DE TAL", documento="***123458**", qualificacao="49"),
+            socio("22222222", nome="FULANO DE TAL", documento="***123458**", qualificacao="49"),
+        ],
+    )
+    tipar_socios(config)
+    gerar_identidades(config)
+    gerar_nos(config)
+    return config
+
+
+def test_laco_e_contado_e_conservado(silver_com_laco_e_paralela: Config) -> None:
+    """Laço não leva a lugar nenhum e infla grau — sai na serialização. Mas sai
+    contado: descarte silencioso é como se perde vínculo sem perceber."""
+    resultado = gerar_arestas(silver_com_laco_e_paralela)
+
+    assert resultado.lacos == 1
+    assert resultado.arestas == 3, "o laço continua na lista; quem descarta é o CSR"
+
+
+def test_par_paralelo_e_contado(silver_com_laco_e_paralela: Config) -> None:
+    """Dois vínculos, um par. É a diferença entre o que esta camada conserva e o
+    que a próxima vai serializar."""
+    resultado = gerar_arestas(silver_com_laco_e_paralela)
+
+    assert resultado.pares_paralelos == 1
+    assert resultado.pares_distintos == 2
+    assert resultado.arestas == 3
+
+
+def test_qualificacao_divergente_e_contada_mesmo_sendo_zero(
+    silver_com_laco_e_paralela: Config,
+) -> None:
+    """O número que decide se o colapso perde informação. Zero aqui significa que
+    os vínculos repetidos são repetição exata — e é medido, não presumido."""
+    resultado = gerar_arestas(silver_com_laco_e_paralela)
+
+    assert resultado.pares_com_qualificacao_divergente == 0
+
+
+def test_divergencia_de_qualificacao_e_detectada(tmp_path: Path) -> None:
+    """Controle positivo do contador anterior: apontado para um par que discorda,
+    ele precisa achar. Contador que só sabe devolver zero não mediu nada."""
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(config, [estabelecimento("11111111")])
+    aplicar_recorte_por_uf(config)
+    gravar_empresas(config, [empresa("11111111", razao_social="ALFA LTDA")])
+    _gravar_dominio(config, "Naturezas", NATUREZAS_PADRAO)
+    _gravar_dominio(config, "Qualificacoes", QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", PAISES_PADRAO)
+    tipar_empresas(config)
+    gravar_socios(
+        config,
+        [
+            socio("11111111", nome="FULANO DE TAL", documento="***123458**", qualificacao="49"),
+            socio("11111111", nome="FULANO DE TAL", documento="***123458**", qualificacao="50"),
+        ],
+    )
+    tipar_socios(config)
+    gerar_identidades(config)
+    gerar_nos(config)
+
+    resultado = gerar_arestas(config)
+
+    assert resultado.pares_paralelos == 1
+    assert resultado.pares_com_qualificacao_divergente == 1
+
+
+# --------------------------------------------------------- as guardas das arestas
+
+
+def gravar_arestas(caminho: Path, valores: str) -> str:
+    with duckdb.connect() as conexao:
+        conexao.execute(
+            f"COPY (SELECT * FROM (VALUES {valores}) AS t(no_empresa, no_socio)) "
+            f"TO '{caminho.as_posix()}' (FORMAT PARQUET)"
+        )
+    return f"read_parquet('{caminho.as_posix()}')"
+
+
+@pytest.mark.parametrize(
+    ("valores", "defeito"),
+    [
+        ("(0, NULL), (1, 2)", "o sócio não é nó"),
+        ("(NULL, 0), (1, 2)", "a empresa não é nó"),
+        ("(NULL, NULL)", "nenhum dos dois"),
+    ],
+)
+def test_extremo_desconhecido_e_recusado(tmp_path: Path, valores: str, defeito: str) -> None:
+    """Extremo nulo vira posição de array que não existe, e o sintoma apareceria
+    longe da causa."""
+    fonte = gravar_arestas(tmp_path / "arestas.parquet", valores)
+
+    with duckdb.connect() as conexao, pytest.raises(ExtremoDesconhecidoError, match="índice nulo"):
+        validar_extremos_conhecidos(conexao, fonte)
+
+
+def test_extremos_conhecidos_passam(tmp_path: Path) -> None:
+    """Controle positivo: sem ele a guarda poderia estar reprovando tudo."""
+    fonte = gravar_arestas(tmp_path / "arestas.parquet", "(0, 1), (1, 2)")
+
+    with duckdb.connect() as conexao:
+        validar_extremos_conhecidos(conexao, fonte)
+
+
+@pytest.mark.parametrize(
+    ("valores", "nos", "defeito"),
+    [
+        ("(0, 3)", 3, "índice igual à quantidade de nós"),
+        ("(0, 9)", 3, "muito acima da faixa"),
+        ("(-1, 0)", 3, "negativo"),
+    ],
+)
+def test_indice_fora_da_faixa_e_recusado(
+    tmp_path: Path, valores: str, nos: int, defeito: str
+) -> None:
+    """Índice fora da faixa não falha na leitura por mmap: devolve o nó errado."""
+    fonte = gravar_arestas(tmp_path / "arestas.parquet", valores)
+
+    with duckdb.connect() as conexao, pytest.raises(IndiceForaDaFaixaError, match="fora da faixa"):
+        validar_indice_na_faixa(conexao, fonte, nos)
+
+
+@pytest.mark.parametrize("valores", ["(0, 1)", "(0, 2), (2, 0)", "(1, 1)"])
+def test_indice_na_faixa_passa(tmp_path: Path, valores: str) -> None:
+    """Controle positivo, incluindo o extremo superior legítimo."""
+    fonte = gravar_arestas(tmp_path / "arestas.parquet", valores)
+
+    with duckdb.connect() as conexao:
+        validar_indice_na_faixa(conexao, fonte, 3)
+
+
+def test_aresta_perdida_e_recusada() -> None:
+    with pytest.raises(ArestaPerdidaError, match="caminho societário"):
+        validar_arestas_conservadas(8_699_764, 8_699_763)
+
+
+def test_conservacao_exata_passa() -> None:
+    """Controle positivo: a guarda precisa saber aprovar o caso legítimo."""
+    validar_arestas_conservadas(8_699_764, 8_699_764)
+
+
+def test_sem_nos_a_mensagem_diz_o_que_falta(silver: Config) -> None:
+    """As arestas dependem do arquivo de nós, e não de um índice recalculado —
+    tem de ser o mesmo que vai ser publicado."""
+    with pytest.raises(NosAusentesError, match="posição da linha"):
+        gerar_arestas(silver)
+
+
+def test_sem_socios_a_mensagem_diz_o_que_falta(tmp_path: Path) -> None:
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    (tmp_path / "silver" / "2026-06").mkdir(parents=True)
+
+    with pytest.raises(SilverAusenteError, match="sócios tipados"):
+        gerar_arestas(config)

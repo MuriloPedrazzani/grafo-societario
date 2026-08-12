@@ -58,6 +58,39 @@ Uma rota do tipo `/no/12345` funcionaria hoje e devolveria **outra empresa** no 
 seguinte — sem erro, sem aviso, com aparência de resposta correta. É o mesmo modo
 de falha do preenchedor de representante: não uma exceção, um resultado plausível e
 falso. O índice não atravessa a fronteira da API.
+
+## As arestas conservam o vínculo, e não a topologia
+
+`arestas.parquet` tem **uma linha por vínculo**, não por par de nós. As duas coisas
+quase coincidem — 8.699.764 vínculos para 8.699.585 pares distintos — mas a
+diferença é onde a qualificação mora: 56 pares aparecem mais de uma vez, somando
+235 vínculos, porque a mesma pessoa pode ser sócia e administradora da mesma
+empresa em dois registros.
+
+Colapsar aqui jogaria fora o atributo antes de alguém decidir o que fazer com ele.
+Quem colapsa é a serialização em CSR, que é onde o par vira posição de array e a
+repetição passa a custar. Esta camada conserva o que o silver entregou, e o que
+ela conserva é conferido: entram 8.699.764 vínculos e saem 8.699.764 arestas, ou
+o pipeline para.
+
+## O que esta camada mede para a seguinte decidir
+
+Três números vão no log de toda execução, **inclusive quando são zero**, porque o
+zero de hoje não é o de todo mês:
+
+- **laços** (empresa sócia de si mesma): 9.049. São legais em CSR e inúteis para
+  caminho — ninguém chega a lugar nenhum por eles — e inflam o grau. Saem na
+  serialização, contados.
+- **pares paralelos**: 56, somando 179 vínculos excedentes. Colapsam em uma aresta.
+- **pares com qualificação divergente**: 0. É o número que decide se o colapso
+  perde informação. Enquanto for zero, os 179 excedentes são repetição exata e o
+  colapso não escolhe nada. Quando deixar de ser, a regra é `min` do código —
+  determinística e total, porque a largura do código é fixa — e o contador é o que
+  faz a escolha aparecer em vez de ser absorvida.
+
+Contar sempre, inclusive no zero, é o mesmo padrão do colapso de matriz duplicada
+do recorte: um número que só aparece quando incomoda é um número em que ninguém
+repara quando passa a incomodar.
 """
 
 from __future__ import annotations
@@ -73,7 +106,9 @@ import numpy as np
 from grafo_societario.config import Config
 from grafo_societario.transform.bronze import abrir_conexao
 from grafo_societario.transform.identity import (
+    EXPRESSAO_DO_IDENTIFICADOR,
     TIPOS,
+    consulta_de_socios_identificados,
     expressao_do_no_de_empresa,
     instalar_identificador,
 )
@@ -113,6 +148,22 @@ POSICAO_DA_REGIAO: Final = 9
 justamente esse à mostra. Num recorte de SP ele é `8` em 86,65% dos sócios, o que
 reduz o espaço efetivo da máscara de 10⁶ para 132.705 e faz a taxa de colisão
 variar vinte vezes entre regiões. Ver `transform.identity`.
+"""
+
+COLUNAS_ARESTAS: Final = ("no_empresa", "no_socio", "qualificacao_socio")
+"""Os dois extremos, como índice denso, e o que o vínculo era.
+
+Os nomes preservam a assimetria. O grafo é **não direcionado** — sócio e empresa
+alcançam um ao outro, e é isso que a Fase 5 percorre — mas a relação não é
+simétrica: "A é sócia de B" não é a mesma frase que "B é sócia de A", e num
+produto de compliance é a frase que interessa. Chamar as colunas de `origem` e
+`destino` inventaria uma direção que a travessia não tem; chamá-las pelo papel
+guarda o que a fonte disse, e a serialização simetriza por cima disso.
+
+`qualificacao_socio` é código, e código é texto — inclusive aqui, onde os dois
+vizinhos são inteiros. A conversão para inteiro é decisão da serialização, que é
+quem tem um array para preencher, e ela precisa vir com a asserção de que o valor
+cabe no tipo escolhido.
 """
 
 TIPOS_DE_PESSOA_FISICA: Final = (TIPOS["2"], TIPOS["3"])
@@ -182,6 +233,22 @@ class ExistenciaDesordenadaError(ErroDeGrafo):
     """O array de existência não está ordenado, e a busca binária mentiria."""
 
 
+class NosAusentesError(ErroDeGrafo):
+    """As arestas foram pedidas antes de os nós existirem."""
+
+
+class ExtremoDesconhecidoError(ErroDeGrafo):
+    """Uma aresta tem extremo que não é nó."""
+
+
+class ArestaPerdidaError(ErroDeGrafo):
+    """Entraram vínculos e saíram menos arestas."""
+
+
+class IndiceForaDaFaixaError(ErroDeGrafo):
+    """Uma aresta endereça posição que não existe no conjunto de nós."""
+
+
 @dataclass(frozen=True)
 class Nos:
     """O que a geração produziu."""
@@ -207,6 +274,90 @@ class Nos:
     expor_pf: bool
     """Se este artefato carrega nome de pessoa física. Falso é o modo publicável;
     verdadeiro só se justifica em execução local sobre os dados originais."""
+
+
+@dataclass(frozen=True)
+class Arestas:
+    """O que a geração produziu, e o que a serialização precisa saber."""
+
+    caminho: Path
+
+    arestas: int
+    """Uma linha por vínculo. Conservado a partir do silver, e conferido."""
+
+    pares_distintos: int
+    """Quantas arestas o CSR terá depois do colapso, laços ainda incluídos."""
+
+    lacos: int
+    """Vínculos de uma empresa consigo mesma. Saem na serialização, contados: são
+    legais em CSR, não levam a lugar nenhum, e inflam o grau de quem os tem."""
+
+    pares_paralelos: int
+    """Pares que aparecem em mais de um vínculo. Colapsam em uma aresta."""
+
+    pares_com_qualificacao_divergente: int
+    """Dos paralelos, quantos discordam na qualificação — os únicos em que o
+    colapso escolhe, em vez de apenas repetir. Enquanto for zero, nada se perde."""
+
+    bytes_das_arestas: int
+
+
+def validar_extremos_conhecidos(conexao: duckdb.DuckDBPyConnection, fonte: str) -> None:
+    """Recusa aresta cujo extremo não é nó.
+
+    Por construção isto é zero: todo `cnpj_basico` que aparece em `socios` entrou
+    no conjunto de nós, e toda identidade de sócio também. É **por** ser zero que a
+    guarda existe — o dia em que deixar de ser, o sintoma não seria uma exceção, e
+    sim um índice nulo virando posição de array em algum ponto adiante.
+    """
+    medida = conexao.execute(
+        f"SELECT count(*) FILTER (WHERE no_empresa IS NULL), "
+        f"count(*) FILTER (WHERE no_socio IS NULL) FROM {fonte}"
+    ).fetchone()
+    sem_empresa, sem_socio = tuple(int(valor) for valor in medida) if medida else (1, 1)
+    if sem_empresa or sem_socio:
+        raise ExtremoDesconhecidoError(
+            f"{sem_empresa:,} arestas não acharam a empresa e {sem_socio:,} não acharam o sócio "
+            "no conjunto de nós. Extremo que não é nó vira índice nulo, e índice nulo endereça "
+            "posição de array que não existe."
+        )
+
+
+def validar_arestas_conservadas(vinculos: int, arestas: int) -> None:
+    """Recusa perda silenciosa de vínculo entre o silver e o grafo.
+
+    É a mesma conferência que a tipagem de sócios faz, pela mesma razão e no
+    degrau seguinte: aresta descartada em silêncio é caminho societário que deixa
+    de existir sem ninguém saber que existia.
+    """
+    if vinculos != arestas:
+        raise ArestaPerdidaError(
+            f"Entraram {vinculos:,} vínculos e saíram {arestas:,} arestas. Alguma junção "
+            "descartou vínculo, e vínculo descartado em silêncio é caminho societário que "
+            "some sem deixar sintoma — o grafo continua íntegro, só não liga o que ligava."
+        )
+
+
+def validar_indice_na_faixa(conexao: duckdb.DuckDBPyConnection, fonte: str, nos: int) -> None:
+    """Recusa índice que não endereça nó existente.
+
+    O CSR indexa array pela posição, sem conferir nada em tempo de consulta. Um
+    índice fora da faixa é, na melhor das hipóteses, erro de leitura fora do
+    limite; na pior, e é a mais provável com `mmap`, **o nó errado devolvido sem
+    erro nenhum**.
+    """
+    medida = conexao.execute(
+        f"SELECT min(least(no_empresa, no_socio)), max(greatest(no_empresa, no_socio)) FROM {fonte}"
+    ).fetchone()
+    if not medida or medida[0] is None:
+        return
+    menor, maior = int(medida[0]), int(medida[1])
+    if menor < 0 or maior >= nos:
+        raise IndiceForaDaFaixaError(
+            f"Os índices das arestas vão de {menor:,} a {maior:,}, fora da faixa 0..{nos - 1:,} "
+            f"dos {nos:,} nós. Índice fora da faixa não falha na leitura por mmap: devolve o nó "
+            "errado, sem erro."
+        )
 
 
 def validar_indice_denso(conexao: duckdb.DuckDBPyConnection, caminho: Path) -> None:
@@ -436,6 +587,162 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
             "bytes_nos": resultado.bytes_dos_nos,
             "bytes_existencia": resultado.bytes_da_existencia,
             "expor_pf": config.expor_pf,
+        },
+    )
+    return resultado
+
+
+def gerar_arestas(config: Config, competencia: str | None = None) -> Arestas:
+    """Liga cada vínculo do silver a um par de índices densos.
+
+    **A aresta tem dois extremos, e os dois saem da mesma regra.** O nó da empresa
+    vem de `expressao_do_no_de_empresa`, e o do sócio de
+    `EXPRESSAO_DO_IDENTIFICADOR` — que usa aquela no ramo de pessoa jurídica. É
+    isso que faz a empresa vista como titular do vínculo e a mesma empresa vista
+    como sócia caírem no mesmo nó, em vez de em dois.
+
+    **O índice vem do arquivo, não de um cálculo paralelo.** `nos.parquet` é lido e
+    numerado pela ordem em que está gravado, que é a definição do índice no commit
+    anterior. Recalculá-lo a partir do silver daria o mesmo número hoje e um número
+    diferente no dia em que a geração de nós mudasse de critério — e o artefato
+    publicado seria o outro.
+
+    **Uma linha por vínculo, e não por par.** A qualificação é atributo do vínculo:
+    a mesma pessoa é sócia e administradora da mesma empresa em dois registros.
+    Colapsar aqui descartaria o atributo antes de a serialização decidir o que
+    fazer com ele — e é lá, onde o par vira posição de array, que a repetição custa.
+    """
+    alvo = competencia or config.competencia
+    socios = config.data_dir / "silver" / alvo / "socios.parquet"
+    if not socios.exists():
+        raise SilverAusenteError(
+            f"Não há sócios tipados em {socios}. As arestas são os vínculos do silver, "
+            "e não do bronze."
+        )
+
+    nos_parquet = config.data_dir / "grafo" / alvo / "nos.parquet"
+    if not nos_parquet.exists():
+        raise NosAusentesError(
+            f"Não há nós em {nos_parquet}. O índice de uma aresta é a posição da linha nesse "
+            "arquivo, então ele precisa existir antes — e ser o mesmo que vai ser publicado."
+        )
+    destino = nos_parquet.with_name("arestas.parquet")
+
+    with abrir_conexao(config, config.data_dir / "duckdb-tmp") as conexao:
+        instalar_identificador(conexao)
+        conexao.execute("SET preserve_insertion_order=false")
+
+        # O `ORDER BY` não é decorativo: com `preserve_insertion_order=false` o
+        # motor não devolve as linhas na ordem em que as leu, e sem ele a numeração
+        # sairia diferente da gravada — que é justamente o que define o índice.
+        conexao.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE no AS
+            SELECT identificador,
+                   CAST(row_number() OVER (ORDER BY identificador) - 1 AS INTEGER) AS indice
+            FROM read_parquet('{nos_parquet.as_posix()}')
+            """
+        )
+        medida = conexao.execute("SELECT count(*) FROM no").fetchone()
+        nos = int(medida[0]) if medida else 0
+
+        conexao.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE vinculo AS
+            SELECT {expressao_do_no_de_empresa("cnpj_basico")} AS empresa,
+                   {EXPRESSAO_DO_IDENTIFICADOR} AS socio,
+                   qualificacao_socio
+            FROM ({consulta_de_socios_identificados(socios)})
+            """
+        )
+        medida = conexao.execute("SELECT count(*) FROM vinculo").fetchone()
+        vinculos = int(medida[0]) if medida else 0
+
+        # LEFT, e não INNER, de propósito: com INNER um extremo desconhecido
+        # sumiria como linha a menos, e a conferência de conservação diria "aresta
+        # perdida" sem dizer de que lado. Com LEFT ele vira nulo e a guarda nomeia
+        # o extremo.
+        conexao.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE aresta AS
+            SELECT e.indice AS no_empresa, s.indice AS no_socio, v.qualificacao_socio
+            FROM vinculo v
+            LEFT JOIN no e ON e.identificador = v.empresa
+            LEFT JOIN no s ON s.identificador = v.socio
+            """
+        )
+        validar_extremos_conhecidos(conexao, "aresta")
+
+        # A terceira coluna entra na ordenação porque as duas primeiras não bastam:
+        # 56 pares aparecem em mais de um vínculo. Ela não torna a ordem total —
+        # linhas que empatam nas três são idênticas, e linhas idênticas são
+        # intercambiáveis, então os bytes saem iguais de qualquer maneira.
+        parcial = destino.with_name(f"{destino.name}.parcial")
+        conexao.execute(
+            f"""
+            COPY (
+              SELECT no_empresa, no_socio, qualificacao_socio FROM aresta
+              ORDER BY no_empresa, no_socio, qualificacao_socio
+            ) TO '{parcial.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+        )
+
+        gravadas = conexao.execute(
+            f"SELECT count(*) FROM read_parquet('{parcial.as_posix()}')"
+        ).fetchone()
+        arestas = int(gravadas[0]) if gravadas else 0
+        try:
+            validar_arestas_conservadas(vinculos, arestas)
+            validar_indice_na_faixa(conexao, f"read_parquet('{parcial.as_posix()}')", nos)
+        except ErroDeGrafo:
+            parcial.unlink(missing_ok=True)
+            raise
+
+        lacos = conexao.execute(
+            f"SELECT count(*) FROM read_parquet('{parcial.as_posix()}') WHERE no_empresa = no_socio"
+        ).fetchone()
+
+        # Os três números do colapso numa passagem só, porque saem do mesmo
+        # agrupamento e varrer 8,7 milhões de linhas três vezes é desperdício.
+        colapso = conexao.execute(
+            f"""
+            SELECT count(*),
+                   count(*) FILTER (WHERE vinculos > 1),
+                   count(*) FILTER (WHERE qualificacoes > 1)
+            FROM (
+              SELECT count(*) AS vinculos, count(DISTINCT qualificacao_socio) AS qualificacoes
+              FROM read_parquet('{parcial.as_posix()}') GROUP BY no_empresa, no_socio
+            )
+            """
+        ).fetchone()
+        pares, paralelos, divergentes = (
+            tuple(int(valor) for valor in colapso) if colapso else (0, 0, 0)
+        )
+
+    parcial.replace(destino)
+
+    resultado = Arestas(
+        caminho=destino,
+        arestas=arestas,
+        pares_distintos=pares,
+        lacos=int(lacos[0]) if lacos else 0,
+        pares_paralelos=paralelos,
+        pares_com_qualificacao_divergente=divergentes,
+        bytes_das_arestas=destino.stat().st_size,
+    )
+    logger.info(
+        "arestas geradas",
+        extra={
+            "competencia": alvo,
+            "uf_alvo": config.uf_alvo,
+            "arestas": resultado.arestas,
+            "pares_distintos": resultado.pares_distintos,
+            "lacos": resultado.lacos,
+            "pares_paralelos": resultado.pares_paralelos,
+            "pares_com_qualificacao_divergente": resultado.pares_com_qualificacao_divergente,
+            "nos": nos,
+            "arquivo": destino.name,
+            "bytes_arestas": resultado.bytes_das_arestas,
         },
     )
     return resultado
