@@ -292,6 +292,31 @@ construção.
 """
 
 
+def consulta_de_socios_identificados(socios: Path) -> str:
+    """SELECT que anexa tipo, confiança e identificador a cada vínculo.
+
+    Público porque tem dois consumidores. A geração usa para produzir o artefato;
+    a verificação de qualidade usa para recomputar e conferir que o artefato em
+    disco corresponde ao silver em disco. Duplicar a expressão nos dois lugares
+    faria a conferência passar a comparar duas regras em vez de uma.
+
+    A Fase 4 usa a mesma consulta para ligar vínculo a nó: o identificador é a
+    chave de junção, porque `identidades.nome` guarda a grafia de exibição e não
+    a normalizada.
+    """
+    return f"""
+    SELECT cnpj_basico,
+           identificador_socio,
+           normalizar_nome(nome_socio_ou_razao_social) AS nome,
+           nome_socio_ou_razao_social AS nome_de_origem,
+           cnpj_cpf_socio,
+           pais,
+           {_TIPO} AS tipo,
+           {_CONFIANCA} AS confianca
+    FROM read_parquet('{socios.as_posix()}')
+    """
+
+
 def gerar_identidades(config: Config, competencia: str | None = None) -> Identidades:
     """Gera o identificador estável de cada sócio do recorte.
 
@@ -340,18 +365,7 @@ def gerar_identidades(config: Config, competencia: str | None = None) -> Identid
     with abrir_conexao(config, config.data_dir / "duckdb-tmp") as conexao:
         instalar_identificador(conexao)
         conexao.execute(
-            f"""
-            CREATE OR REPLACE TEMP TABLE socio AS
-            SELECT cnpj_basico,
-                   identificador_socio,
-                   normalizar_nome(nome_socio_ou_razao_social) AS nome,
-                   nome_socio_ou_razao_social AS nome_de_origem,
-                   cnpj_cpf_socio,
-                   pais,
-                   {_TIPO} AS tipo,
-                   {_CONFIANCA} AS confianca
-            FROM read_parquet('{socios.as_posix()}')
-            """
+            f"CREATE OR REPLACE TEMP TABLE socio AS {consulta_de_socios_identificados(socios)}"
         )
         # `no_recorte` é marcado aqui, uma vez, e não por junção dentro da
         # agregação: um LEFT JOIN das 8,7 milhões de linhas contra os 19,7 milhões
