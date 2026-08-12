@@ -37,10 +37,16 @@ Nem tudo que o pipeline precisa saber está no PDF. A distinção é deliberada:
 | Uso de aspas | Arquivo real | **Confirmado, e ao contrário do presumido:** é consistente |
 | Separador dentro de campo citado | Arquivo real | **Confirmado** — 4 a 5% de Estabelecimentos |
 | Quebra de linha dentro de campo citado | Arquivo real | **Confirmado** — raro, mas existe |
+| Códigos de situação cadastral | Arquivo real | **Contradiz o PDF** — sempre dois dígitos |
+| Códigos de porte | Arquivo real | **Contradiz o PDF** — `00` nunca aparece |
 
 As quatro últimas do primeiro grupo estavam marcadas como "a conferir" até que os
 23,24 GiB da competência 2026-06 fossem baixados e lidos, em 2026-08-10. As duas
-últimas da tabela nem eram suspeitadas: apareceram na leitura.
+sobre campo citado nem eram suspeitadas: apareceram na leitura.
+
+As duas últimas são de outra natureza. Não são lacunas do PDF, que existem e são
+esperadas: são afirmações dele que o arquivo desmente. Um documento incompleto
+manda conferir; um documento errado manda escrever código que não casa com nada.
 
 ### O que a leitura do arquivo real mudou
 
@@ -62,6 +68,32 @@ linhas: se a origem fosse cp1252, eles estariam em razão social e nome fantasia
 
 Note que "latin-1 decodificou sem erro" **não** é argumento: latin-1 mapeia os 256
 bytes possíveis e nunca falha em arquivo nenhum.
+
+**O PDF enumera códigos que o arquivo não usa.** Em `situacao_cadastral` o
+documento lista `01` nula, `2` ativa, `3` suspensa, `4` inapta, `08` baixada — três
+dos cinco sem o zero à esquerda. No arquivo, **todos** têm dois dígitos, sem uma
+única exceção em 71.874.448 registros:
+
+| Código no PDF | Código no arquivo | Registros |
+|---|---|---:|
+| `01` | `01` | 109.337 |
+| `2` | `02` | 28.092.890 |
+| `3` | `03` | 314.616 |
+| `4` | `04` | 9.547.457 |
+| `08` | `08` | 33.810.148 |
+
+Quem escrever `situacao_cadastral = '2'` a partir da documentação — que é a leitura
+natural dela — casa **zero** de 28.092.890 linhas. Não levanta erro, não emite
+aviso: devolve conjunto vazio, e a ausência de resultado passa por resposta.
+
+O mesmo vale para `porte`, onde o PDF define `00` como "não informado": esse código
+**não aparece** no arquivo, e a ausência de porte vem como campo vazio em 4.063
+registros. Os códigos `02` e `04`, que o documento deixa indefinidos, também não
+aparecem.
+
+A conclusão prática é a mesma dos dois casos, e vale para todo código deste
+projeto: **a enumeração do PDF não é contrato.** Levante os valores distintos do
+arquivo antes de comparar contra literal.
 
 **Contagem de linha física não é contagem de registro.** Como há quebra de linha
 dentro de campo citado, `Estabelecimentos6` tem 4.753.436 linhas físicas para
@@ -87,11 +119,13 @@ perde linha silenciosamente, e a origem deixa de ser reproduzível.
 | 3 | `natureza_juridica` | NATUREZA JURÍDICA | Código; decodificar pela tabela de naturezas |
 | 4 | `qualificacao_do_responsavel` | QUALIFICAÇÃO DO RESPONSÁVEL | Código; decodificar pela tabela de qualificações |
 | 5 | `capital_social` | CAPITAL SOCIAL DA EMPRESA | |
-| 6 | `porte` | PORTE DA EMPRESA | `00` não informado, `01` micro, `03` pequeno porte, `05` demais |
+| 6 | `porte` | PORTE DA EMPRESA | No arquivo: `01` micro, `03` pequeno porte, `05` demais, e vazio quando não informado |
 | 7 | `ente_federativo_responsavel` | ENTE FEDERATIVO RESPONSÁVEL | Preenchido só para natureza jurídica do grupo `1XXX`; em branco nas demais |
 
-O PDF não define os códigos `02` e `04` de porte. Não invente significado para
-eles se aparecerem no dado.
+O PDF define `00` como "não informado" e deixa `02` e `04` indefinidos. Nenhum dos
+três aparece na competência 2026-06: a ausência de porte vem como campo **vazio**,
+em 4.063 dos 68.629.148 registros. Não invente significado para `02` e `04` se
+aparecerem numa competência futura.
 
 ## Estabelecimentos — 30 colunas
 
@@ -104,7 +138,7 @@ O maior volume, e a origem do recorte territorial.
 | 3 | `cnpj_dv` | CNPJ DV | Dois últimos dígitos |
 | 4 | `identificador_matriz_filial` | IDENTIFICADOR MATRIZ/FILIAL | `1` matriz, `2` filial. **Base do recorte por UF** |
 | 5 | `nome_fantasia` | NOME FANTASIA | |
-| 6 | `situacao_cadastral` | SITUAÇÃO CADASTRAL | `01` nula, `2` ativa, `3` suspensa, `4` inapta, `08` baixada |
+| 6 | `situacao_cadastral` | SITUAÇÃO CADASTRAL | No arquivo, sempre com dois dígitos: `01` nula, `02` ativa, `03` suspensa, `04` inapta, `08` baixada |
 | 7 | `data_situacao_cadastral` | DATA SITUAÇÃO CADASTRAL | |
 | 8 | `motivo_situacao_cadastral` | MOTIVO SITUAÇÃO CADASTRAL | Código |
 | 9 | `nome_cidade_exterior` | NOME DA CIDADE NO EXTERIOR | |
@@ -130,10 +164,11 @@ O maior volume, e a origem do recorte territorial.
 | 29 | `situacao_especial` | SITUAÇÃO ESPECIAL | |
 | 30 | `data_situacao_especial` | DATA DA SITUAÇÃO ESPECIAL | |
 
-Note a inconsistência de preenchimento com zero à esquerda **no próprio documento
-oficial**: situação cadastral lista `01`, `2`, `3`, `4`, `08`. Comparar esses
-códigos como número, ou assumir largura fixa, é caminho para descarte silencioso.
-Compare como texto, exatamente como veio.
+A inconsistência de zero à esquerda que o documento oficial exibe — `01`, `2`, `3`,
+`4`, `08` — **não existe no arquivo**, onde os cinco códigos têm dois dígitos. Ver
+"O PDF enumera códigos que o arquivo não usa", acima: comparar contra o literal do
+PDF devolve conjunto vazio sem erro nenhum. Compare como texto, exatamente como
+veio no arquivo — nunca como número, e nunca como o documento escreveu.
 
 ## Sócios — 11 colunas
 
