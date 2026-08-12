@@ -93,7 +93,7 @@ def ler_nos(caminho: Path) -> list[dict[str, object]]:
         colunas = [linha[0] for linha in conexao.execute("DESCRIBE n").fetchall()]
         return [
             dict(zip(colunas, linha, strict=True))
-            for linha in conexao.execute("SELECT * FROM n ORDER BY indice").fetchall()
+            for linha in conexao.execute("SELECT * FROM n").fetchall()
         ]
 
 
@@ -157,31 +157,35 @@ def test_socia_de_fora_do_recorte_entra_marcada(silver: Config) -> None:
 # ------------------------------------------------------- o índice denso
 
 
-def test_indice_cobre_zero_ate_n_menos_um(silver: Config) -> None:
-    resultado = gerar_nos(silver)
-
-    indices = [int(str(linha["indice"])) for linha in ler_nos(resultado.caminho)]
-    assert indices == list(range(resultado.nos))
-
-
-def test_indice_e_int32_e_nao_int64(silver: Config) -> None:
-    """São 10,6 milhões de nós contra um teto de 2,1 bilhões. O dobro de largura
-    custaria 40 MiB no `indptr` sem comprar nada."""
+def test_nao_existe_coluna_de_indice(silver: Config) -> None:
+    """O índice é a posição da linha. Gravá-lo custava 27,8 MiB para repetir o
+    número da linha em que o número já estava."""
     resultado = gerar_nos(silver)
 
     with duckdb.connect() as conexao:
-        tipo = conexao.execute(
-            f"SELECT column_type FROM (DESCRIBE SELECT * FROM "
-            f"read_parquet('{resultado.caminho.as_posix()}')) WHERE column_name = 'indice'"
-        ).fetchone()
-    assert tipo is not None
-    assert tipo[0] == "INTEGER"
+        colunas = {
+            linha[0]
+            for linha in conexao.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{resultado.caminho.as_posix()}')"
+            ).fetchall()
+        }
+    assert "indice" not in colunas
 
 
-def gravar_indices(caminho: Path, valores: str) -> Path:
+def test_o_arquivo_esta_ordenado_por_identificador(silver: Config) -> None:
+    """É o que torna a posição da linha um índice: sem ordem estrita, a linha k
+    deixa de ser o nó k e o CSR passa a endereçar outro nó."""
+    resultado = gerar_nos(silver)
+
+    identificadores = [str(linha["identificador"]) for linha in ler_nos(resultado.caminho)]
+    assert identificadores == sorted(identificadores)
+    assert len(set(identificadores)) == resultado.nos
+
+
+def gravar_identificadores(caminho: Path, valores: str) -> Path:
     with duckdb.connect() as conexao:
         conexao.execute(
-            f"COPY (SELECT * FROM (VALUES {valores}) AS t(indice)) "
+            f"COPY (SELECT * FROM (VALUES {valores}) AS t(identificador)) "
             f"TO '{caminho.as_posix()}' (FORMAT PARQUET)"
         )
     return caminho
@@ -190,27 +194,24 @@ def gravar_indices(caminho: Path, valores: str) -> Path:
 @pytest.mark.parametrize(
     ("valores", "defeito"),
     [
-        ("(0), (1), (3)", "buraco: 2 não existe"),
-        ("(0), (1), (1)", "repetição: dois nós na mesma posição"),
-        ("(1), (2), (3)", "não começa em zero"),
+        ("('bb'), ('aa'), ('cc')", "fora de ordem: a linha k não é o nó k"),
+        ("('aa'), ('aa'), ('bb')", "repetido: dois nós na mesma posição"),
+        ("('cc'), ('bb'), ('aa')", "decrescente"),
     ],
 )
-def test_indice_nao_denso_e_recusado(tmp_path: Path, valores: str, defeito: str) -> None:
-    """A guarda exercitada contra casos construídos para reprovar.
+def test_posicao_que_nao_e_indice_denso_e_recusada(
+    tmp_path: Path, valores: str, defeito: str
+) -> None:
+    """A guarda exercitada contra casos construídos para reprovar."""
+    caminho = gravar_identificadores(tmp_path / "nos.parquet", valores)
 
-    Buraco faz o CSR endereçar posição que não existe; repetição faz dois nós
-    dividirem a mesma lista de vizinhos. Nos dois casos o sintoma é caminho
-    societário errado, e não exceção.
-    """
-    caminho = gravar_indices(tmp_path / "nos.parquet", valores)
-
-    with duckdb.connect() as conexao, pytest.raises(IndiceNaoDensoError, match="sem buraco"):
+    with duckdb.connect() as conexao, pytest.raises(IndiceNaoDensoError, match="linha k"):
         validar_indice_denso(conexao, caminho)
 
 
-def test_indice_denso_passa_pela_guarda(tmp_path: Path) -> None:
+def test_arquivo_ordenado_passa_pela_guarda(tmp_path: Path) -> None:
     """Controle positivo: sem ele, a guarda poderia estar reprovando tudo."""
-    caminho = gravar_indices(tmp_path / "nos.parquet", "(0), (1), (2)")
+    caminho = gravar_identificadores(tmp_path / "nos.parquet", "('aa'), ('bb'), ('cc')")
 
     with duckdb.connect() as conexao:
         validar_indice_denso(conexao, caminho)
@@ -307,6 +308,75 @@ def test_pessoa_fisica_leva_a_taxa_de_colisao_para_o_no(silver: Config) -> None:
     assert len(fisicas) == 1
     assert fisicas[0]["confianca"] == "estimada"
     assert fisicas[0]["taxa_de_colisao"] is not None
+
+
+# ------------------------------------- nome de pessoa física e o artefato
+
+
+def test_artefato_publicavel_nao_carrega_nome_de_pessoa_fisica(silver: Config) -> None:
+    """`nos.parquet` vai para Release e para imagem Docker.
+
+    São 5,6 milhões de nós que são gente. Pseudonimizar na resposta da API não
+    desfaria nada — é o mesmo argumento que moveu a supressão de CPF para a
+    transformação, aplicado ao campo vizinho: o que entra no artefato já saiu.
+    """
+    assert silver.expor_pf is False, "o padrão é o modo publicável"
+
+    resultado = gerar_nos(silver)
+
+    por_tipo: dict[str, list[object]] = {}
+    for linha in ler_nos(resultado.caminho):
+        por_tipo.setdefault(str(linha["tipo"]), []).append(linha["nome"])
+    assert all(nome is None for nome in por_tipo["pessoa_fisica"])
+    assert resultado.expor_pf is False
+
+
+def test_razao_social_de_pessoa_juridica_permanece(silver: Config) -> None:
+    """A distinção não mudou: nome legal do negócio sai em nota fiscal e no cartão
+    CNPJ. Apagá-lo custaria utilidade sem comprar privacidade."""
+    resultado = gerar_nos(silver)
+
+    por_identificador = {str(linha["identificador"]): linha for linha in ler_nos(resultado.caminho)}
+    assert por_identificador[no_da_empresa("11111111")]["nome"] == "ALFA LTDA"
+
+
+def test_estrangeiro_conta_como_pessoa_fisica(tmp_path: Path) -> None:
+    """Estrangeiro entra na regra por ser pessoa, e não por ter documento — ele
+    não tem nenhum."""
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(config, [estabelecimento("11111111")])
+    aplicar_recorte_por_uf(config)
+    gravar_empresas(config, [empresa("11111111", razao_social="ALFA LTDA")])
+    _gravar_dominio(config, "Naturezas", NATUREZAS_PADRAO)
+    _gravar_dominio(config, "Qualificacoes", QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", PAISES_PADRAO)
+    tipar_empresas(config)
+    gravar_socios(
+        config, [socio("11111111", tipo="3", nome="ECHO FOXTROT", documento="", pais="249")]
+    )
+    tipar_socios(config)
+    gerar_identidades(config)
+
+    resultado = gerar_nos(config)
+
+    estrangeiros = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "estrangeiro"]
+    assert len(estrangeiros) == 1
+    assert estrangeiros[0]["nome"] is None
+
+
+def test_expor_pf_verdadeiro_gera_artefato_local_com_nomes(silver: Config) -> None:
+    """O outro modo, sem o qual a flag não estaria realmente decidindo nada.
+
+    Quem roda local sobre os dados originais precisa dos nomes: o código é aberto
+    justamente para isso. O que não acontece é o artefato **publicado** carregá-los.
+    """
+    local = silver.model_copy(update={"expor_pf": True})
+
+    resultado = gerar_nos(local)
+
+    fisicas = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_fisica"]
+    assert [linha["nome"] for linha in fisicas] == ["FULANO DE TAL"]
+    assert resultado.expor_pf is True
 
 
 def test_sem_silver_a_mensagem_diz_o_que_falta(tmp_path: Path) -> None:

@@ -124,6 +124,18 @@ class Config(ConexaoRfb):
     cache de download: a execução seguinte rebaixaria 6,79 GiB da Receita para
     economizar espaço que já estava pago."""
 
+    expor_pf: bool = False
+    """Se o **nome** de pessoa física entra nos artefatos do grafo.
+
+    Falso por padrão, e é assim que o artefato publicado é construído. Verdadeiro
+    é para quem roda o pipeline localmente sobre os dados originais e precisa dos
+    nomes — o código é aberto justamente para isso.
+
+    A flag decide na **geração**, não na resposta da API, pelo mesmo motivo que
+    moveu a supressão de CPF para a transformação: os artefatos vão para GitHub
+    Release e para imagem Docker, e nome que entrou no artefato já saiu. Filtrar
+    depois não desfaz publicação."""
+
     @field_validator("uf_alvo")
     @classmethod
     def _uf_conhecida(cls, valor: str) -> str:

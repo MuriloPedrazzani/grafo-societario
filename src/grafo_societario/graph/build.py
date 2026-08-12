@@ -20,12 +20,28 @@ resposta certa é que ela não tem vínculo societário registrado.
 
 Daí a separação em dois artefatos:
 
-- **`nos.parquet`** — os 10.658.250 nós com pelo menos uma aresta, com o índice
-  denso e os atributos de cada um. É o dicionário reverso do grafo.
+- **`nos.parquet`** — os 10.658.250 nós com pelo menos uma aresta e os atributos de
+  cada um, ordenados por identificador. É o dicionário reverso do grafo, e o índice
+  de um nó é a posição da linha.
 - **`existencia.npy`** — os 19.770.618 `cnpj_basico` do recorte, como int32
   ordenado. Responde existência por busca binária, **exatamente**: sem falso
   positivo, ao contrário de um filtro probabilístico, e sem carregar metadado de
   quem não tem vínculo.
+
+## Nome de pessoa física não entra no artefato publicado
+
+`nos.parquet` vai para GitHub Release e para imagem Docker, e 5,6 milhões dos seus
+nós são gente. Pseudonimizar na resposta da API não desfaria nada — é o mesmo
+argumento que moveu a supressão de CPF para a transformação, aplicado ao campo
+vizinho: o que entra no artefato já saiu.
+
+`EXPOR_PF` decide na geração. Falso, que é o padrão e o modo do artefato publicado,
+deixa o nome nulo para pessoa física e para estrangeiro. Verdadeiro é para quem
+roda o pipeline localmente sobre os dados originais — o código é aberto para isso.
+
+Razão social de pessoa jurídica permanece nos dois modos: é o nome legal do
+negócio, sai em nota fiscal e no cartão CNPJ, e a distinção já está registrada em
+`transform.silver`.
 
 O `cnpj_basico` tem oito dígitos e vai até 98.669.773 — cabe em int32 com folga de
 vinte e uma vezes. São 75,4 MiB, contra 150,8 MiB em int64. O zero à esquerda se
@@ -61,7 +77,6 @@ from grafo_societario.transform.identity import TIPOS, instalar_identificador
 logger = logging.getLogger(__name__)
 
 COLUNAS_NOS: Final = (
-    "indice",
     "identificador",
     "tipo",
     "nome",
@@ -72,14 +87,48 @@ COLUNAS_NOS: Final = (
     "confianca",
     "taxa_de_colisao",
 )
-"""O dicionário reverso: de índice denso para o que o nó é.
+"""O dicionário reverso: da posição da linha para o que o nó é.
 
-`indice` é INTEGER, não BIGINT. São 10.658.250 nós contra um teto de 2.147.483.647,
-folga de duzentas vezes — e o dobro de largura custaria 40 MiB no `indptr` sem
-comprar nada. A decisão está medida, não presumida.
+**Não há coluna `indice`.** O índice de um nó é a posição da linha, porque o
+arquivo é gravado ordenado por `identificador` e lido inteiro. Gravá-lo custava
+27,8 MiB para repetir o número da linha em que o número já estava — não é dívida
+a pagar depois, é dado que não precisa existir.
+
+A validação de densidade continua, agora sobre a posição: ela confere que a
+ordenação é estrita e sem repetição, que é o que garante que a linha `k` é o nó
+`k`.
 """
 
 TIPO_DE_EMPRESA: Final = TIPOS["1"]
+
+TIPOS_DE_PESSOA_FISICA: Final = (TIPOS["2"], TIPOS["3"])
+"""Os dois tipos de nó que são gente: pessoa física e estrangeiro.
+
+Estrangeiro entra aqui porque é pessoa, e não porque tem documento — ele não tem
+nenhum. A regra é sobre quem o nó é, não sobre o que se sabe dele.
+"""
+
+
+def _nome_publicavel(expor_pf: bool) -> str:
+    """Expressão do nome do nó, conforme o artefato vá ser publicado ou não.
+
+    **Nome de pessoa física não entra no artefato publicado.** `nos.parquet` vai
+    para GitHub Release e para imagem Docker, e são 5,6 milhões de nomes de gente.
+    Pseudonimizar na resposta da API não desfaria nada — é o mesmo argumento que
+    moveu a supressão de CPF para a transformação, aplicado ao campo vizinho.
+
+    Quem roda local com `EXPOR_PF=true` gera o seu artefato com os nomes: o código
+    é aberto e os dados são os originais da Receita. O que não acontece é o
+    artefato **publicado** carregá-los.
+
+    Razão social de pessoa jurídica permanece nos dois casos. Ela é o nome legal
+    do negócio, sai em nota fiscal e no cartão CNPJ — a distinção é a mesma já
+    registrada em `transform.silver`, e não mudou.
+    """
+    if expor_pf:
+        return "nome"
+    pessoas = ", ".join(f"'{tipo}'" for tipo in TIPOS_DE_PESSOA_FISICA)
+    return f"CASE WHEN tipo IN ({pessoas}) THEN NULL ELSE nome END"
 
 
 class ErroDeGrafo(RuntimeError):
@@ -120,25 +169,37 @@ class Nos:
     bytes_dos_nos: int
     bytes_da_existencia: int
 
+    expor_pf: bool
+    """Se este artefato carrega nome de pessoa física. Falso é o modo publicável;
+    verdadeiro só se justifica em execução local sobre os dados originais."""
+
 
 def validar_indice_denso(conexao: duckdb.DuckDBPyConnection, caminho: Path) -> None:
-    """Recusa índice que não cubra exatamente 0..N-1.
+    """Recusa arquivo em que a posição da linha não seja um índice denso.
 
-    O índice é endereço de posição em array. Buraco faz o CSR apontar para posição
-    que não existe; repetição faz dois nós dividirem a mesma lista de vizinhos. Nos
-    dois casos o erro aparece como caminho societário errado, não como exceção.
+    Sem coluna de índice, o índice **é** a posição da linha, e isso só vale se o
+    arquivo estiver ordenado por `identificador` sem repetição. Repetição faria
+    dois nós disputarem a mesma posição, e desordem faria a linha `k` deixar de ser
+    o nó `k` — nos dois casos o sintoma é caminho societário errado, não exceção.
     """
     medida = conexao.execute(
-        f"SELECT count(*), min(indice), max(indice), count(DISTINCT indice) "
-        f"FROM read_parquet('{caminho.as_posix()}')"
+        f"""
+        SELECT count(*), count(DISTINCT identificador),
+               count(*) FILTER (WHERE identificador <= anterior)
+        FROM (
+          SELECT identificador, lag(identificador) OVER () AS anterior
+          FROM read_parquet('{caminho.as_posix()}')
+        )
+        """
     ).fetchone()
-    quantos, menor, maior, distintos = (
-        tuple(int(valor) for valor in medida) if medida else (0, -1, -1, 0)
+    quantos, distintos, fora_de_ordem = (
+        tuple(int(valor) for valor in medida) if medida else (0, 0, 1)
     )
-    if (menor, maior, distintos) != (0, quantos - 1, quantos):
+    if distintos != quantos or fora_de_ordem:
         raise IndiceNaoDensoError(
-            f"O índice precisa cobrir 0..{quantos - 1:,} sem buraco nem repetição, e saiu com "
-            f"menor={menor}, maior={maior}, distintos={distintos:,}. Índice esparso faz o CSR "
+            f"O arquivo precisa estar ordenado por identificador, sem repetição, para que a "
+            f"linha k seja o nó k: são {quantos:,} linhas, {distintos:,} identificadores "
+            f"distintos e {fora_de_ordem:,} fora de ordem. Índice que não é denso faz o CSR "
             "endereçar posição que não existe."
         )
 
@@ -246,7 +307,8 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
         conexao.execute(
             f"""
             COPY (
-              SELECT CAST(row_number() OVER (ORDER BY identificador) - 1 AS INTEGER) AS indice, *
+              SELECT identificador, tipo, {_nome_publicavel(config.expor_pf)} AS nome,
+                     cnpj_basico, cpf_mascarado, pais, no_recorte, confianca, taxa_de_colisao
               FROM (
                 SELECT
                   coalesce(e.identificador, i.identificador) AS identificador,
@@ -322,6 +384,7 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
         isolados=isolados,
         bytes_dos_nos=nos_parquet.stat().st_size,
         bytes_da_existencia=existencia_npy.stat().st_size,
+        expor_pf=config.expor_pf,
     )
     logger.info(
         "nós indexados",
@@ -334,6 +397,7 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
             "isolados": resultado.isolados,
             "bytes_nos": resultado.bytes_dos_nos,
             "bytes_existencia": resultado.bytes_da_existencia,
+            "expor_pf": config.expor_pf,
         },
     )
     return resultado
