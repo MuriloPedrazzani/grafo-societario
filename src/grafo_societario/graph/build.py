@@ -72,7 +72,11 @@ import numpy as np
 
 from grafo_societario.config import Config
 from grafo_societario.transform.bronze import abrir_conexao
-from grafo_societario.transform.identity import TIPOS, instalar_identificador
+from grafo_societario.transform.identity import (
+    TIPOS,
+    expressao_do_no_de_empresa,
+    instalar_identificador,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +324,7 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
         conexao.execute(
             f"""
             CREATE OR REPLACE TEMP TABLE empresa_no AS
-            SELECT identificador(['{TIPO_DE_EMPRESA}', e.cnpj_basico]) AS identificador,
+            SELECT {expressao_do_no_de_empresa("e.cnpj_basico")} AS identificador,
                    e.razao_social AS nome,
                    e.cnpj_basico
             FROM read_parquet('{empresas.as_posix()}') e

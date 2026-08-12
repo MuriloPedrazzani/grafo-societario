@@ -190,6 +190,24 @@ def instalar_identificador(conexao: duckdb.DuckDBPyConnection) -> None:
     conexao.execute(MACRO_DE_IDENTIFICADOR)
 
 
+def expressao_do_no_de_empresa(cnpj_basico: str) -> str:
+    """O identificador de um nó de pessoa jurídica, dada a coluna do `cnpj_basico`.
+
+    **Uma aresta tem dois extremos, e os dois precisam da mesma chave.** O extremo
+    do sócio sai de `EXPRESSAO_DO_IDENTIFICADOR`; o da empresa sai daqui. Se as
+    duas divergirem, a mesma empresa vira dois nós — um por ser empresa, outro por
+    ser sócia — e o caminho societário que passava por ela deixa de existir. Sem
+    exceção, sem contagem errada: com um grafo que simplesmente não liga o que
+    liga, que é o modo de falha mais caro deste projeto.
+
+    Recebe a expressão da coluna porque o `cnpj_basico` chega de lugares
+    diferentes: coluna própria em `empresas` e em `socios`, e os oito primeiros
+    dígitos de `cnpj_cpf_socio` quando o sócio é pessoa jurídica. O que não varia
+    é a regra, e é ela que mora aqui — o caminho até o valor é de quem chama.
+    """
+    return f"identificador(['{TIPOS['1']}', {cnpj_basico}])"
+
+
 # ------------------------------------------------------------------- artefato
 
 COLUNAS_IDENTIDADES: Final = (
@@ -267,7 +285,7 @@ END
 
 EXPRESSAO_DO_IDENTIFICADOR: Final = f"""
 CASE confianca
-  WHEN '{EXATA}' THEN identificador(['{TIPOS["1"]}', substr(cnpj_cpf_socio, 1, 8)])
+  WHEN '{EXATA}' THEN {expressao_do_no_de_empresa("substr(cnpj_cpf_socio, 1, 8)")}
   WHEN '{ESTIMADA}' THEN identificador(['{TIPOS["2"]}', nome, cnpj_cpf_socio])
   WHEN '{FRACA}' THEN identificador(['{TIPOS["3"]}', nome, coalesce(pais, '')])
   ELSE identificador(['{NAO_FUNDIVEL}', cnpj_basico, coalesce(cnpj_cpf_socio, ''),
