@@ -35,3 +35,4 @@ repos:
           - typer>=0.15
           - duckdb>=1.1
           - numpy>=2.0
+          - scipy-stubs>=1.14

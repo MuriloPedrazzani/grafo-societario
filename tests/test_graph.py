@@ -8,6 +8,7 @@ e a segunda seria mentira sobre 14,79 milhões de empresas do recorte.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import numpy as np
@@ -17,20 +18,29 @@ from grafo_societario.config import Config
 from grafo_societario.graph.build import (
     COLUNAS_ARESTAS,
     COLUNAS_NOS,
+    SENTINELA_DE_QUALIFICACAO,
     ArestaPerdidaError,
+    ArestasAusentesError,
     ExistenciaDesordenadaError,
     ExtremoDesconhecidoError,
     IndiceForaDaFaixaError,
     IndiceNaoDensoError,
     NosAusentesError,
+    QualificacaoForaDoTipoError,
     SilverAusenteError,
+    SimetriaQuebradaError,
+    VizinhoDesordenadoError,
     gerar_arestas,
     gerar_nos,
+    serializar_csr,
     validar_arestas_conservadas,
     validar_existencia_ordenada,
     validar_extremos_conhecidos,
     validar_indice_denso,
     validar_indice_na_faixa,
+    validar_qualificacao_cabe_em_int8,
+    validar_simetria,
+    validar_vizinhos_ordenados,
 )
 from grafo_societario.transform.identity import gerar_identidades, identificador
 from grafo_societario.transform.silver import (
@@ -748,3 +758,422 @@ def test_sem_socios_a_mensagem_diz_o_que_falta(tmp_path: Path) -> None:
 
     with pytest.raises(SilverAusenteError, match="sócios tipados"):
         gerar_arestas(config)
+
+
+# ------------------------------------------------------------ o CSR
+
+
+def preparar_grafo(config: Config) -> None:
+    """Nós e arestas, na ordem em que a fase os produz."""
+    gerar_nos(config)
+    gerar_arestas(config)
+
+
+def construir_csr(config: Config) -> tuple[Any, Any, Any]:
+    """Roda a fase inteira e devolve os três arrays como o consumidor os lê."""
+    preparar_grafo(config)
+    resultado = serializar_csr(config)
+    return (
+        np.load(resultado.caminho_do_indptr),
+        np.load(resultado.caminho_dos_indices),
+        np.load(resultado.caminho_das_qualificacoes),
+    )
+
+
+def vizinhos(indptr: Any, indices: Any, no: int) -> list[int]:
+    return [int(v) for v in indices[indptr[no] : indptr[no + 1]]]
+
+
+def test_toda_aresta_ocupa_duas_posicoes(silver: Config) -> None:
+    """O grafo é não direcionado: alcançar B a partir de A e A a partir de B são
+    a mesma aresta, gravada duas vezes."""
+    gerar_nos(silver)
+    arestas = gerar_arestas(silver)
+
+    resultado = serializar_csr(silver)
+
+    assert resultado.arestas == 3
+    assert resultado.posicoes == 2 * resultado.arestas
+    assert arestas.arestas == 3
+
+
+def test_os_dois_extremos_se_alcancam(silver: Config) -> None:
+    """A propriedade que a travessia da Fase 5 vai usar, exercitada aqui."""
+    nos = gerar_nos(silver)
+    indice = indice_por_identificador(nos.caminho)
+    indptr, indices, _ = construir_csr(silver)
+
+    alfa = indice[no_da_empresa("11111111")]
+    bravo = indice[no_da_empresa("22222222")]
+    assert bravo in vizinhos(indptr, indices, alfa)
+    assert alfa in vizinhos(indptr, indices, bravo)
+
+
+def test_indptr_tem_uma_entrada_por_no_mais_uma(silver: Config) -> None:
+    """Inclusive para nó sem aresta: a linha existe e é vazia, senão a posição
+    deixa de ser o índice."""
+    nos = gerar_nos(silver)
+    indptr, indices, _ = construir_csr(silver)
+
+    assert indptr.size == nos.nos + 1
+    assert int(indptr[0]) == 0
+    assert int(indptr[-1]) == indices.size
+
+
+def test_os_tipos_sao_os_declarados(silver: Config) -> None:
+    """int32 nos dois arrays de topologia, int8 no atributo. Em int64 o CSR
+    passaria de 107,0 para 214,1 MiB sem comprar nada."""
+    indptr, indices, qualificacoes = construir_csr(silver)
+
+    assert indptr.dtype == np.int32
+    assert indices.dtype == np.int32
+    assert qualificacoes.dtype == np.int8
+
+
+# ---------------------------- o invariante canônico: vizinho ordenado na linha
+
+
+def test_vizinhos_saem_ordenados_dentro_da_linha(silver: Config) -> None:
+    """Afirmado sobre o artefato, não pretendido pela consulta que o gerou."""
+    indptr, indices, _ = construir_csr(silver)
+
+    for no in range(indptr.size - 1):
+        linha = vizinhos(indptr, indices, no)
+        assert linha == sorted(linha)
+        assert len(set(linha)) == len(linha), "vizinho repetido na mesma linha"
+
+
+def test_adjacencia_por_busca_binaria_confere_com_a_varredura(silver: Config) -> None:
+    """O que a ordenação compra: `O(log grau)` em vez de `O(grau)`.
+
+    O teste vale menos pelo desempenho e mais por provar que os dois caminhos
+    concordam — se a linha não estivesse ordenada, a busca binária responderia
+    "não são vizinhos" para quem é, e só este confronto pegaria.
+    """
+    indptr, indices, _ = construir_csr(silver)
+
+    for no in range(indptr.size - 1):
+        linha = indices[indptr[no] : indptr[no + 1]]
+        for candidato in range(indptr.size - 1):
+            posicao = int(np.searchsorted(linha, candidato))
+            binaria = posicao < linha.size and int(linha[posicao]) == candidato
+            assert binaria == (candidato in {int(v) for v in linha})
+
+
+@pytest.mark.parametrize(
+    ("indptr", "indices", "defeito"),
+    [
+        ([0, 2], [1, 0], "decrescente dentro da linha"),
+        ([0, 2], [1, 1], "vizinho repetido"),
+        ([0, 3], [0, 2, 1], "última fora de ordem"),
+        ([0, 2, 4], [0, 1, 3, 2], "desordem na segunda linha"),
+    ],
+)
+def test_vizinho_desordenado_e_recusado(
+    indptr: list[int], indices: list[int], defeito: str
+) -> None:
+    with pytest.raises(VizinhoDesordenadoError, match="estritamente crescente"):
+        validar_vizinhos_ordenados(
+            np.array(indptr, dtype=np.int32), np.array(indices, dtype=np.int32)
+        )
+
+
+@pytest.mark.parametrize(
+    ("indptr", "indices"),
+    [
+        ([0, 2, 3], [1, 2, 0]),
+        ([0, 0, 2], [0, 1]),
+        ([0], []),
+        ([0, 1], [0]),
+    ],
+)
+def test_linha_ordenada_passa(indptr: list[int], indices: list[int]) -> None:
+    """Controle positivo, incluindo linha vazia e grafo vazio — a guarda não pode
+    reprovar o caso legítimo em que a desordem é só entre linhas."""
+    validar_vizinhos_ordenados(np.array(indptr, dtype=np.int32), np.array(indices, dtype=np.int32))
+
+
+# ------------------------- o atributo tem de sobreviver à simetrização
+
+
+def test_qualificacao_e_identica_nas_duas_posicoes(silver: Config) -> None:
+    """Se dessincronizar de `indices`, nenhuma contagem muda — só o significado."""
+    nos = gerar_nos(silver)
+    indice = indice_por_identificador(nos.caminho)
+    indptr, indices, qualificacoes = construir_csr(silver)
+
+    alfa = indice[no_da_empresa("11111111")]
+    bravo = indice[no_da_empresa("22222222")]
+    ida = qualificacoes[indptr[alfa] : indptr[alfa + 1]][
+        vizinhos(indptr, indices, alfa).index(bravo)
+    ]
+    volta = qualificacoes[indptr[bravo] : indptr[bravo + 1]][
+        vizinhos(indptr, indices, bravo).index(alfa)
+    ]
+    assert int(ida) == int(volta) == 49
+
+
+def test_simetria_com_atributo_alinhado_passa() -> None:
+    """Controle positivo: um triângulo com atributos distintos por aresta."""
+    indptr = np.array([0, 2, 4, 6], dtype=np.int32)
+    indices = np.array([1, 2, 0, 2, 0, 1], dtype=np.int32)
+    qualificacoes = np.array([10, 20, 10, 30, 20, 30], dtype=np.int8)
+
+    validar_simetria(indptr, indices, qualificacoes)
+
+
+def test_atributo_dessincronizado_e_recusado() -> None:
+    """O caso construído para reprovar: mesma topologia, mesmo tamanho, mesma
+    contagem — e o atributo trocado entre duas posições espelhadas."""
+    indptr = np.array([0, 2, 4, 6], dtype=np.int32)
+    indices = np.array([1, 2, 0, 2, 0, 1], dtype=np.int32)
+    torto = np.array([10, 20, 99, 30, 20, 30], dtype=np.int8)
+
+    with pytest.raises(SimetriaQuebradaError, match="idêntica nas duas posições"):
+        validar_simetria(indptr, indices, torto)
+
+
+def test_topologia_assimetrica_e_recusada() -> None:
+    """Aresta que só existe de um lado: o caminho passa a depender da ponta pela
+    qual se pergunta."""
+    indptr = np.array([0, 1, 1], dtype=np.int32)
+    indices = np.array([1], dtype=np.int32)
+    qualificacoes = np.array([10], dtype=np.int8)
+
+    with pytest.raises(SimetriaQuebradaError, match="simétrico"):
+        validar_simetria(indptr, indices, qualificacoes)
+
+
+# ------------------------------------------ o atributo em int8, e a sentinela
+
+
+def test_qualificacao_cabe_em_int8_no_dado_real() -> None:
+    """Controle positivo da asserção: a faixa medida passa."""
+    validar_qualificacao_cabe_em_int8(np.array([0, 49, 79], dtype=np.int16))
+
+
+@pytest.mark.parametrize("valores", [[128], [79, 200], [-129]])
+def test_qualificacao_fora_do_int8_e_recusada(valores: list[int]) -> None:
+    """A largura de dois dígitos é medida nesta competência, não declarada pelo
+    layout — a garantia é a asserção, não o raciocínio."""
+    with pytest.raises(QualificacaoForaDoTipoError, match="resto da divisão"):
+        validar_qualificacao_cabe_em_int8(np.array(valores, dtype=np.int16))
+
+
+def test_sentinela_e_valor_impossivel_e_nao_apenas_improvavel() -> None:
+    """`0` existe na fonte e significa "não informada", que é diferente de
+    ausente. Código da Receita não é negativo."""
+    assert SENTINELA_DE_QUALIFICACAO < 0
+
+
+# ------------------------- o par mútuo, que a simetrização ingênua duplicaria
+
+
+@pytest.fixture
+def silver_com_par_mutuo(tmp_path: Path) -> Config:
+    """A é sócia de B e B é sócia de A, com qualificações diferentes.
+
+    São 654 pares assim no recorte real. Colapsar pelo par **ordenado** os
+    manteria como dois registros, e a simetrização somaria mais dois: o mesmo
+    vizinho apareceria duas vezes na mesma linha, com `indptr` fechando certo.
+    """
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(config, [estabelecimento(cnpj) for cnpj in ("11111111", "22222222")])
+    aplicar_recorte_por_uf(config)
+    gravar_empresas(
+        config,
+        [
+            empresa("11111111", razao_social="ALFA LTDA"),
+            empresa("22222222", razao_social="BRAVO LTDA"),
+        ],
+    )
+    _gravar_dominio(config, "Naturezas", NATUREZAS_PADRAO)
+    _gravar_dominio(config, "Qualificacoes", QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", PAISES_PADRAO)
+    tipar_empresas(config)
+    gravar_socios(
+        config,
+        [
+            socio(
+                "11111111",
+                tipo="1",
+                nome="BRAVO LTDA",
+                documento="22222222000199",
+                qualificacao="49",
+            ),
+            socio(
+                "22222222",
+                tipo="1",
+                nome="ALFA LTDA",
+                documento="11111111000199",
+                qualificacao="50",
+            ),
+        ],
+    )
+    tipar_socios(config)
+    gerar_identidades(config)
+    return config
+
+
+def test_par_mutuo_vira_uma_aresta_so(silver_com_par_mutuo: Config) -> None:
+    """Dois vínculos, um par não ordenado, duas posições — não quatro."""
+    gerar_nos(silver_com_par_mutuo)
+    arestas = gerar_arestas(silver_com_par_mutuo)
+
+    resultado = serializar_csr(silver_com_par_mutuo)
+
+    assert arestas.arestas == 2, "dois vínculos entram na lista"
+    assert resultado.arestas == 1, "e viram uma aresta só"
+    assert resultado.posicoes == 2
+    assert resultado.pares_mutuos == 1
+
+
+def test_par_mutuo_nao_repete_vizinho_na_linha(silver_com_par_mutuo: Config) -> None:
+    """O sintoma que a contagem não pegaria: `indptr` fecha, o total bate, e o
+    grau vem inflado."""
+    indptr, indices, _ = construir_csr(silver_com_par_mutuo)
+
+    for no in range(indptr.size - 1):
+        linha = vizinhos(indptr, indices, no)
+        assert len(linha) == len(set(linha))
+    assert int(np.diff(indptr).max()) == 1
+
+
+def test_qualificacao_divergente_e_colapsada_pelo_menor_codigo(
+    silver_com_par_mutuo: Config,
+) -> None:
+    """Regra determinística e total, e o contador que a torna visível."""
+    indptr, _, qualificacoes = construir_csr(silver_com_par_mutuo)
+    resultado = serializar_csr(silver_com_par_mutuo)
+
+    assert resultado.pares_com_qualificacao_divergente == 1
+    assert set(int(q) for q in qualificacoes) == {49}, "o menor entre 49 e 50"
+    assert indptr.size == resultado.nos + 1
+
+
+# ---------------------------------------------- laço: descartado e contado
+
+
+def test_laco_sai_do_csr_contado(silver_com_laco_e_paralela: Config) -> None:
+    """Laço não leva a lugar nenhum, e manter um somaria dois ao grau de um nó
+    que não ganhou vizinho nenhum."""
+    preparar_grafo(silver_com_laco_e_paralela)
+
+    resultado = serializar_csr(silver_com_laco_e_paralela)
+
+    indptr = np.load(resultado.caminho_do_indptr)
+    indices = np.load(resultado.caminho_dos_indices)
+    assert resultado.lacos_descartados == 1
+    for no in range(indptr.size - 1):
+        assert no not in vizinhos(indptr, indices, no), "nó não é vizinho de si mesmo"
+
+
+# ------------------------ validação cruzada contra uma implementação independente
+
+
+def csr_de_referencia(linhas: Any, colunas: Any, nos: int) -> tuple[Any, Any]:
+    """O mesmo CSR, montado pelo scipy.
+
+    Outro algoritmo, escrito por outra gente, resolvendo o mesmo problema. É a
+    mesma validação cruzada que fez o `csv.reader` da Fase 1 concordar com o
+    DuckDB da Fase 2 sobre 168 milhões de registros: duas implementações
+    independentes que chegam ao mesmo resultado erram juntas só por coincidência.
+    """
+    from scipy.sparse import coo_matrix
+
+    matriz = coo_matrix(
+        (np.ones(linhas.size, dtype=np.int8), (linhas, colunas)),
+        shape=(nos, nos),
+    ).tocsr()
+    return matriz.indptr, matriz.indices
+
+
+def pares_simetrizados(caminho: Path, nos: int) -> tuple[Any, Any]:
+    """Lê as arestas e simetriza fora do nosso código, para alimentar o scipy com
+    o insumo e não com o resultado."""
+    with duckdb.connect() as conexao:
+        linhas = conexao.execute(
+            f"""
+            SELECT least(no_empresa, no_socio) AS a, greatest(no_empresa, no_socio) AS b
+            FROM read_parquet('{caminho.as_posix()}')
+            WHERE no_empresa <> no_socio
+            GROUP BY 1, 2
+            """
+        ).fetchall()
+    origem = np.array([a for a, _ in linhas] + [b for _, b in linhas], dtype=np.int32)
+    destino = np.array([b for _, b in linhas] + [a for a, _ in linhas], dtype=np.int32)
+    assert origem.size == 2 * len(linhas)
+    assert nos > 0
+    return origem, destino
+
+
+@pytest.mark.parametrize(
+    "fixture", ["silver", "silver_com_laco_e_paralela", "silver_com_par_mutuo"]
+)
+def test_o_csr_confere_com_o_do_scipy(fixture: str, request: pytest.FixtureRequest) -> None:
+    """`indptr` e `indices` comparados array a array com os do scipy.
+
+    Os três casos cobrem o que o nosso código decide e o scipy não: laço
+    descartado, aresta paralela colapsada e par mútuo unificado. O scipy recebe o
+    insumo já com essas decisões aplicadas — o que ele confere é a construção do
+    formato, que é justamente onde um erro nosso não teria testemunha.
+    """
+    config: Config = request.getfixturevalue(fixture)
+    preparar_grafo(config)
+
+    resultado = serializar_csr(config)
+
+    indptr = np.load(resultado.caminho_do_indptr)
+    indices = np.load(resultado.caminho_dos_indices)
+    origem, destino = pares_simetrizados(
+        resultado.caminho_do_indptr.with_name("arestas.parquet"), resultado.nos
+    )
+    esperado_indptr, esperado_indices = csr_de_referencia(origem, destino, resultado.nos)
+
+    assert np.array_equal(indptr, esperado_indptr)
+    assert np.array_equal(indices, esperado_indices)
+
+
+# ---------------------------------------------------- as portas de entrada
+
+
+def test_sem_arestas_a_mensagem_diz_o_que_falta(silver: Config) -> None:
+    gerar_nos(silver)
+
+    with pytest.raises(ArestasAusentesError, match="serialização delas"):
+        serializar_csr(silver)
+
+
+def test_sem_nos_o_csr_recusa(tmp_path: Path) -> None:
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    (tmp_path / "grafo" / "2026-06").mkdir(parents=True)
+
+    with pytest.raises(NosAusentesError, match="uma linha por nó"):
+        serializar_csr(config)
+
+
+def test_o_csr_e_deterministico(silver: Config) -> None:
+    """Mesmo insumo, mesmos bytes nos três arrays."""
+    gerar_nos(silver)
+    gerar_arestas(silver)
+    primeiro = serializar_csr(silver)
+    antes = [
+        caminho.read_bytes()
+        for caminho in (
+            primeiro.caminho_do_indptr,
+            primeiro.caminho_dos_indices,
+            primeiro.caminho_das_qualificacoes,
+        )
+    ]
+
+    segundo = serializar_csr(silver)
+
+    depois = [
+        caminho.read_bytes()
+        for caminho in (
+            segundo.caminho_do_indptr,
+            segundo.caminho_dos_indices,
+            segundo.caminho_das_qualificacoes,
+        )
+    ]
+    assert depois == antes

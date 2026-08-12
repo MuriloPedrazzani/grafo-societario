@@ -173,6 +173,19 @@ Estrangeiro entra aqui porque é pessoa, e não porque tem documento — ele nã
 nenhum. A regra é sobre quem o nó é, não sobre o que se sabe dele.
 """
 
+SENTINELA_DE_QUALIFICACAO: Final = -1
+"""O que ocupa a posição quando o vínculo não tem qualificação.
+
+Um array de int8 não tem nulo, e o código `0` está ocupado: ele existe na fonte e
+significa "não informada", que é diferente de ausente. `-1` está livre porque
+código da Receita não é negativo, e escolher um valor impossível em vez de um
+improvável é o que impede a ausência de virar um código de verdade.
+
+No recorte de SP de 2026-06 ele não aparece nenhuma vez — os 8.699.764 vínculos
+têm qualificação. A sentinela existe porque "zero nesta competência" não é
+"zero sempre", e descobrir isso com um `IndexError` na Fase 6 seria tarde.
+"""
+
 
 def _nome_publicavel(expor_pf: bool) -> str:
     """Expressão do nome do nó, conforme o artefato vá ser publicado ou não.
@@ -249,6 +262,26 @@ class IndiceForaDaFaixaError(ErroDeGrafo):
     """Uma aresta endereça posição que não existe no conjunto de nós."""
 
 
+class ArestasAusentesError(ErroDeGrafo):
+    """A serialização foi pedida antes de a lista de arestas existir."""
+
+
+class QualificacaoNaoNumericaError(ErroDeGrafo):
+    """Um código de qualificação não é número, e não cabe em array de inteiro."""
+
+
+class QualificacaoForaDoTipoError(ErroDeGrafo):
+    """Um código de qualificação não cabe no tipo escolhido para o array."""
+
+
+class VizinhoDesordenadoError(ErroDeGrafo):
+    """Os vizinhos de uma linha não estão em ordem estritamente crescente."""
+
+
+class SimetriaQuebradaError(ErroDeGrafo):
+    """O grafo não é simétrico, ou o atributo não acompanhou a simetrização."""
+
+
 @dataclass(frozen=True)
 class Nos:
     """O que a geração produziu."""
@@ -300,6 +333,168 @@ class Arestas:
     colapso escolhe, em vez de apenas repetir. Enquanto for zero, nada se perde."""
 
     bytes_das_arestas: int
+
+
+@dataclass(frozen=True)
+class Csr:
+    """O grafo em formato CSR, e o que precisou ser descartado para ele existir."""
+
+    caminho_do_indptr: Path
+    caminho_dos_indices: Path
+    caminho_das_qualificacoes: Path
+
+    nos: int
+
+    arestas: int
+    """Pares **não ordenados** distintos. É o número de arestas do grafo."""
+
+    posicoes: int
+    """`2 * arestas`. Cada aresta ocupa uma posição na linha de cada extremo."""
+
+    lacos_descartados: int
+    """Vínculos de uma empresa consigo mesma. Não levam a lugar nenhum e inflariam
+    o grau de quem os tem, então saem — contados, nunca em silêncio."""
+
+    pares_com_qualificacao_divergente: int
+    """Arestas cujos vínculos discordam da qualificação, e onde `min` escolhe de
+    fato. Fora desses, o colapso só repete o que já era igual."""
+
+    pares_mutuos: int
+    """A é sócia de B **e** B é sócia de A. Colapsar pelo par ordenado deixaria
+    esses vizinhos repetidos dentro da mesma linha do CSR."""
+
+    grau_maximo: int
+    bytes_totais: int
+
+
+def validar_qualificacao_cabe_em_int8(
+    valores: np.ndarray[Any, np.dtype[np.integer[Any]]],
+) -> None:
+    """Recusa qualificação que não caiba no tipo do array paralelo.
+
+    A largura de dois dígitos foi **medida nesta competência**, e o layout oficial
+    não a declara — o mesmo PDF já errou três vezes sobre estes arquivos, e o
+    código `36` nem existe na tabela de domínio que deveria contê-lo. Concluir daí
+    que o código nunca passa de 99 seria transformar observação em garantia.
+
+    Então a garantia é esta linha, e não o raciocínio: se um dia entrar código de
+    três dígitos, a serialização para aqui em vez de gravar o resto da divisão por
+    256 e servir "Sócio-Administrador" onde era outra coisa.
+    """
+    if not valores.size:
+        return
+    menor, maior = int(valores.min()), int(valores.max())
+    limite = np.iinfo(np.int8)
+    if menor < limite.min or maior > limite.max:
+        raise QualificacaoForaDoTipoError(
+            f"As qualificações vão de {menor} a {maior}, fora da faixa "
+            f"{limite.min}..{limite.max} do int8. Estreitar assim mesmo grava o resto da "
+            "divisão e devolve a qualificação de outro código, sem erro nenhum."
+        )
+
+
+def validar_indice_cabe_em_int32(
+    valores: np.ndarray[Any, np.dtype[np.integer[Any]]],
+) -> None:
+    """Recusa `indptr` que não caiba no tipo escolhido para o array.
+
+    O maior valor medido é 17.379.764 contra um teto de 2.147.483.647 — folga de
+    123 vezes, e é essa folga que justifica int32 em vez de int64, economizando
+    107 MiB sobre um orçamento de 500 MB. Justificativa medida vale para hoje; a
+    asserção vale para o dia em que o recorte deixar de ser uma UF.
+
+    Sem ela, o estreitamento é um `and` com `0xFFFFFFFF`: `indptr` volta a
+    crescer do zero no meio do arquivo, e todo nó depois disso passa a apontar
+    para os vizinhos de outro.
+    """
+    if not valores.size:
+        return
+    maior = int(valores.max())
+    limite = np.iinfo(np.int32)
+    if maior > limite.max:
+        raise IndiceForaDaFaixaError(
+            f"O maior valor de indptr é {maior:,}, acima do teto {limite.max:,} do int32. "
+            "Estreitar assim mesmo faz o ponteiro dar a volta e apontar para os vizinhos de "
+            "outro nó, sem erro."
+        )
+
+
+def validar_vizinhos_ordenados(
+    indptr: np.ndarray[Any, np.dtype[np.int32]],
+    indices: np.ndarray[Any, np.dtype[np.int32]],
+) -> None:
+    """Recusa CSR cujos vizinhos não estejam ordenados dentro de cada linha.
+
+    É o invariante canônico do formato, e não é decoração: com a linha ordenada,
+    perguntar se dois nós são vizinhos custa `O(log grau)` por busca binária, em
+    vez de varrer a linha inteira. Num grafo cujo maior grau é 3.728, é a
+    diferença entre onze comparações e três mil e setecentas — e a travessia da
+    Fase 5 faz essa pergunta milhões de vezes.
+
+    A ordenação estrita também é o que garante que **não há vizinho repetido**:
+    aresta paralela sobrevivente apareceria aqui como igualdade, não como erro de
+    contagem.
+
+    Refazer a ordem depois custa reescrever o artefato inteiro, então ela é
+    afirmada agora.
+    """
+    if indices.size < 2:
+        return
+    inicio_de_linha = np.zeros(indices.size, dtype=bool)
+    inicio_de_linha[indptr[:-1][np.diff(indptr) > 0]] = True
+    interior = ~inicio_de_linha[1:]
+    if not bool(np.all(indices[1:][interior] > indices[:-1][interior])):
+        raise VizinhoDesordenadoError(
+            "Os vizinhos precisam ficar em ordem estritamente crescente dentro de cada linha. "
+            "Fora de ordem, a busca binária de adjacência responde 'não são vizinhos' para "
+            "quem é; repetido, o mesmo vizinho é visitado duas vezes e o grau mente."
+        )
+
+
+def validar_simetria(
+    indptr: np.ndarray[Any, np.dtype[np.int32]],
+    indices: np.ndarray[Any, np.dtype[np.int32]],
+    qualificacoes: np.ndarray[Any, np.dtype[np.int8]],
+) -> None:
+    """Recusa grafo assimétrico, e atributo que não acompanhou a simetrização.
+
+    Cada aresta ocupa **duas** posições: uma na linha de um extremo, outra na do
+    outro. A qualificação tem de estar idêntica nas duas, e é aqui que mora o modo
+    de falha mais silencioso de todo o formato: se o array de atributo
+    dessincronizar de `indices`, **nenhuma contagem muda**. O tamanho continua
+    certo, a topologia continua certa, `indptr` continua somando — só o
+    significado de cada posição fica trocado, e a API passa a dizer que fulano é
+    administrador de uma empresa de que ele é apenas sócio.
+
+    A conferência é o espelho: para cada posição que diz "de `u` para `v`" tem de
+    existir uma que diga "de `v` para `u`", e as duas têm de carregar a mesma
+    qualificação. Comparar a matriz com a sua transposta é a única checagem que
+    um deslocamento de atributo não sobrevive.
+    """
+    nos = int(indptr.size) - 1
+    if not indices.size:
+        return
+    linhas = np.repeat(np.arange(nos, dtype=np.int64), np.diff(indptr))
+    colunas = indices.astype(np.int64)
+    direta = linhas * nos + colunas
+    transposta = colunas * nos + linhas
+    del linhas, colunas
+
+    ordem = np.argsort(transposta, kind="stable")
+    if not np.array_equal(transposta[ordem], direta):
+        raise SimetriaQuebradaError(
+            "O grafo precisa ser simétrico: toda aresta de u para v tem de ter a de v para u. "
+            "Sem isso a travessia alcança um extremo a partir do outro e não o contrário, e o "
+            "caminho existe ou não conforme a ponta pela qual se pergunta."
+        )
+    del direta, transposta
+
+    if not np.array_equal(qualificacoes[ordem], qualificacoes):
+        raise SimetriaQuebradaError(
+            "A qualificação precisa ser idêntica nas duas posições da mesma aresta. Atributo "
+            "dessincronizado de indices não muda contagem nenhuma — muda só o significado de "
+            "cada posição, e a resposta sai plausível e errada."
+        )
 
 
 def validar_extremos_conhecidos(conexao: duckdb.DuckDBPyConnection, fonte: str) -> None:
@@ -743,6 +938,176 @@ def gerar_arestas(config: Config, competencia: str | None = None) -> Arestas:
             "nos": nos,
             "arquivo": destino.name,
             "bytes_arestas": resultado.bytes_das_arestas,
+        },
+    )
+    return resultado
+
+
+def _gravar(caminho: Path, array: np.ndarray[Any, np.dtype[Any]]) -> int:
+    """Grava um `.npy` por arquivo temporário, para nunca deixar meio artefato.
+
+    O descritor é aberto aqui de propósito: `np.save` acrescenta `.npy` ao nome
+    quando ele não termina assim, e o temporário `indptr.npy.parcial` viraria
+    `indptr.npy.parcial.npy`. Com o arquivo já aberto, ele grava onde mandaram.
+    """
+    parcial = caminho.with_name(f"{caminho.name}.parcial")
+    with parcial.open("wb") as arquivo:
+        np.save(arquivo, array, allow_pickle=False)
+    parcial.replace(caminho)
+    return caminho.stat().st_size
+
+
+def serializar_csr(config: Config, competencia: str | None = None) -> Csr:
+    """Transforma a lista de arestas em `indptr`, `indices` e o atributo paralelo.
+
+    **O colapso é sobre o par não ordenado, e não sobre o par ordenado.** São 654
+    casos no recorte em que A é sócia de B e B é sócia de A. Agrupar pelo par
+    ordenado os manteria como dois registros, e a simetrização somaria mais dois —
+    o mesmo vizinho apareceria **duas vezes** dentro da mesma linha. Ninguém
+    reclamaria: `indptr` fecharia, o total bateria, e o grau desses 654 nós viria
+    inflado. Colapsar pelo par não ordenado resolve na origem, e de quebra faz a
+    qualificação ser a mesma nos dois sentidos por construção, que é justamente o
+    que a simetria precisa afirmar.
+
+    **A qualificação sobrevivente é o menor código.** Determinística e total,
+    porque a largura do código é fixa. Ela só decide alguma coisa em 14 arestas —
+    as que têm vínculos discordantes — e esse número vai no log de toda execução,
+    inclusive quando é zero, para que o dia em que o colapso passar a escolher
+    muito não passe despercebido.
+
+    **Laço sai.** 9.049 vínculos de empresa consigo mesma. Não levam a lugar
+    nenhum, e manter um deles somaria dois ao grau de um nó que não ganhou vizinho
+    nenhum. Saem contados.
+    """
+    alvo = competencia or config.competencia
+    destino = config.data_dir / "grafo" / alvo
+    arestas_parquet = destino / "arestas.parquet"
+    nos_parquet = destino / "nos.parquet"
+    if not nos_parquet.exists():
+        raise NosAusentesError(
+            f"Não há nós em {nos_parquet}. O CSR tem uma linha por nó, então o conjunto de nós "
+            "precisa existir antes — e ser o mesmo que gerou os índices das arestas."
+        )
+    if not arestas_parquet.exists():
+        raise ArestasAusentesError(
+            f"Não há arestas em {arestas_parquet}. O CSR é a serialização delas, e não uma "
+            "segunda leitura do silver."
+        )
+
+    with abrir_conexao(config, config.data_dir / "duckdb-tmp") as conexao:
+        conexao.execute("SET preserve_insertion_order=false")
+        medida = conexao.execute(
+            f"SELECT count(*) FROM read_parquet('{nos_parquet.as_posix()}')"
+        ).fetchone()
+        nos = int(medida[0]) if medida else 0
+
+        conexao.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE colapsada AS
+            SELECT least(no_empresa, no_socio) AS a,
+                   greatest(no_empresa, no_socio) AS b,
+                   min(qualificacao_socio) AS qualificacao,
+                   count(DISTINCT qualificacao_socio) AS qualificacoes
+            FROM read_parquet('{arestas_parquet.as_posix()}')
+            WHERE no_empresa <> no_socio
+            GROUP BY 1, 2
+            """
+        )
+
+        contagens = conexao.execute(
+            f"""
+            SELECT
+              (SELECT count(*) FROM read_parquet('{arestas_parquet.as_posix()}')
+               WHERE no_empresa = no_socio),
+              (SELECT count(*) FROM colapsada),
+              (SELECT count(*) FROM colapsada WHERE qualificacoes > 1),
+              (SELECT count(*) FROM (
+                 SELECT DISTINCT no_empresa, no_socio
+                 FROM read_parquet('{arestas_parquet.as_posix()}')
+                 WHERE no_empresa <> no_socio)),
+              (SELECT count(*) FROM colapsada
+               WHERE qualificacao IS NOT NULL AND TRY_CAST(qualificacao AS SMALLINT) IS NULL)
+            """
+        ).fetchone()
+        lacos, arestas, divergentes, ordenados, nao_numericas = (
+            tuple(int(valor) for valor in contagens) if contagens else (0, 0, 0, 0, 0)
+        )
+        if nao_numericas:
+            raise QualificacaoNaoNumericaError(
+                f"{nao_numericas:,} arestas têm qualificação que não é número e não cabe num "
+                "array de inteiro. O código é texto na origem justamente porque a fonte é "
+                "inconsistente; converter em silêncio descartaria o atributo dessas arestas."
+            )
+
+        # A simetrização é aqui, e o `ORDER BY` é o que produz o formato: ordenado
+        # por linha, e por vizinho dentro da linha. Sem ele não há CSR, há uma
+        # lista de pares.
+        tabela = conexao.execute(
+            f"""
+            SELECT origem, destino, qualificacao FROM (
+              SELECT a AS origem, b AS destino,
+                     coalesce(TRY_CAST(qualificacao AS SMALLINT), {SENTINELA_DE_QUALIFICACAO})
+                       AS qualificacao
+              FROM colapsada
+              UNION ALL
+              SELECT b, a,
+                     coalesce(TRY_CAST(qualificacao AS SMALLINT), {SENTINELA_DE_QUALIFICACAO})
+              FROM colapsada
+            )
+            ORDER BY origem, destino
+            """
+        ).fetchnumpy()
+
+    origem = np.ascontiguousarray(tabela["origem"], dtype=np.int64)
+    indices = np.ascontiguousarray(tabela["destino"], dtype=np.int32)
+    largura = np.ascontiguousarray(tabela["qualificacao"], dtype=np.int16)
+    del tabela
+
+    validar_qualificacao_cabe_em_int8(largura)
+    qualificacoes = largura.astype(np.int8)
+    del largura
+
+    acumulado = np.cumsum(np.bincount(origem, minlength=nos))
+    indptr = np.zeros(nos + 1, dtype=np.int32)
+    validar_indice_cabe_em_int32(acumulado)
+    indptr[1:] = acumulado
+    del origem, acumulado
+
+    validar_vizinhos_ordenados(indptr, indices)
+    validar_simetria(indptr, indices, qualificacoes)
+
+    bytes_totais = (
+        _gravar(destino / "indptr.npy", indptr)
+        + _gravar(destino / "indices.npy", indices)
+        + _gravar(destino / "qualificacoes.npy", qualificacoes)
+    )
+
+    resultado = Csr(
+        caminho_do_indptr=destino / "indptr.npy",
+        caminho_dos_indices=destino / "indices.npy",
+        caminho_das_qualificacoes=destino / "qualificacoes.npy",
+        nos=nos,
+        arestas=arestas,
+        posicoes=int(indices.size),
+        lacos_descartados=lacos,
+        pares_com_qualificacao_divergente=divergentes,
+        pares_mutuos=ordenados - arestas,
+        grau_maximo=int(np.diff(indptr).max()) if nos else 0,
+        bytes_totais=bytes_totais,
+    )
+    logger.info(
+        "grafo serializado em CSR",
+        extra={
+            "competencia": alvo,
+            "uf_alvo": config.uf_alvo,
+            "nos": resultado.nos,
+            "arestas": resultado.arestas,
+            "posicoes": resultado.posicoes,
+            "lacos_descartados": resultado.lacos_descartados,
+            "pares_com_qualificacao_divergente": resultado.pares_com_qualificacao_divergente,
+            "pares_mutuos": resultado.pares_mutuos,
+            "grau_maximo": resultado.grau_maximo,
+            "bytes_totais": resultado.bytes_totais,
         },
     )
     return resultado

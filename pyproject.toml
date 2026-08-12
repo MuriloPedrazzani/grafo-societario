@@ -35,6 +35,13 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "pre-commit>=4.0",
+    # Implementação independente de CSR, usada para conferir a nossa contra
+    # outro algoritmo escrito por outra gente. Vira dependência de execução no
+    # commit 25, onde `components.py` usa `scipy.sparse.csgraph`.
+    "scipy>=1.14",
+    # Os stubs entram junto: o mypy roda em modo strict, e a saída para uma
+    # biblioteca sem tipos é instalar os tipos, não afrouxar a verificação.
+    "scipy-stubs>=1.14",
 ]
 
 [project.urls]
