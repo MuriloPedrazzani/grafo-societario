@@ -8,14 +8,29 @@ meio" passaria na suíte inteira.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import duckdb
 import pytest
 
+from grafo_societario.config import Config
 from grafo_societario.transform.identity import (
+    COLUNAS_IDENTIDADES,
+    ESTIMADA,
+    EXATA,
+    FRACA,
+    NAO_FUNDIVEL,
     PARTICULAS,
+    Identidades,
+    SociosAusentesError,
+    gerar_identidades,
+    identificador,
+    instalar_identificador,
     instalar_normalizacao,
     normalizar_nome,
 )
+from grafo_societario.transform.silver import tipar_socios
+from test_silver import preparar_socios, socio
 
 # ------------------------------- tipo 1: variação de codificação, sempre segura
 
@@ -192,3 +207,330 @@ def test_a_equivalencia_tem_caso_que_exercita_cada_degrau() -> None:
         cru for cru in CASOS_DE_EQUIVALENCIA if cru and normalizar_nome(cru) != cru.strip()
     ]
     assert len(transformados) >= 8
+
+
+# ====================================================== identificador estável
+
+
+@pytest.fixture
+def config_de_identidade(tmp_path: Path) -> Config:
+    return Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+
+
+def gerar(config: Config, registros: list[dict[str, str]], **extras: object) -> Identidades:
+    preparar_socios(config, registros, **extras)  # type: ignore[arg-type]
+    tipar_socios(config)
+    return gerar_identidades(config)
+
+
+def ler(caminho: Path) -> dict[str, dict[str, object]]:
+    with duckdb.connect() as conexao:
+        conexao.execute(f"CREATE VIEW i AS SELECT * FROM read_parquet('{caminho.as_posix()}')")
+        colunas = [linha[0] for linha in conexao.execute("DESCRIBE i").fetchall()]
+        linhas = conexao.execute("SELECT * FROM i").fetchall()
+    return {
+        str(dict(zip(colunas, linha, strict=True))["identificador"]): dict(
+            zip(colunas, linha, strict=True)
+        )
+        for linha in linhas
+    }
+
+
+# ------------------------------------------------ o critério de aceite do plano
+
+
+def test_mesmo_socio_em_duas_empresas_gera_o_mesmo_id(config_de_identidade: Config) -> None:
+    """O critério que define se a identidade serve para alguma coisa.
+
+    Sem ele não há grafo: cada participação viraria uma pessoa diferente, e
+    caminho societário entre duas empresas nunca existiria.
+    """
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="JOSE DA SILVA", documento="***123456**"),
+            socio("22222222", nome="JOSE DA SILVA", documento="***123456**"),
+        ],
+    )
+
+    identidades = ler(resultado.caminho)
+    pessoas = [linha for linha in identidades.values() if linha["tipo"] == "pessoa_fisica"]
+    assert len(pessoas) == 1
+    assert pessoas[0]["vinculos_no_recorte"] == 2
+
+
+def test_a_normalizacao_alcanca_a_identidade(config_de_identidade: Config) -> None:
+    """Grafias que normalizam igual são a mesma pessoa, com a mesma máscara."""
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="MARIA APARECIDA DA SILVA", documento="***123456**"),
+            socio("22222222", nome="maria aparecida silva", documento="***123456**"),
+        ],
+    )
+
+    pessoas = [
+        linha for linha in ler(resultado.caminho).values() if linha["tipo"] == "pessoa_fisica"
+    ]
+    assert len(pessoas) == 1
+    assert pessoas[0]["vinculos_no_recorte"] == 2
+
+
+def test_mesma_mascara_com_nomes_diferentes_sao_duas_pessoas(
+    config_de_identidade: Config,
+) -> None:
+    """O outro lado: a máscara sozinha não identifica, e o nome é quem separa.
+
+    São 48,8 pessoas por máscara na região fiscal de SP. Sem o nome, todas elas
+    seriam um nó só.
+    """
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="JOSE DA SILVA", documento="***123456**"),
+            socio("22222222", nome="MARIA SOUZA", documento="***123456**"),
+        ],
+    )
+
+    pessoas = [
+        linha for linha in ler(resultado.caminho).values() if linha["tipo"] == "pessoa_fisica"
+    ]
+    assert len(pessoas) == 2
+
+
+# ------------------------------------------------------- os quatro caminhos
+
+
+def test_pessoa_juridica_identifica_pelo_cnpj_basico(config_de_identidade: Config) -> None:
+    """Grafia do nome não muda a identidade de PJ: o cnpj_basico é exato."""
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", tipo="1", nome="ACME LTDA", documento="99999999000199"),
+            socio("22222222", tipo="1", nome="ACME LIMITADA", documento="99999999000280"),
+        ],
+    )
+
+    juridicas = [
+        linha for linha in ler(resultado.caminho).values() if linha["tipo"] == "pessoa_juridica"
+    ]
+    assert len(juridicas) == 1
+    assert juridicas[0]["cnpj_basico"] == "99999999"
+    assert juridicas[0]["confianca"] == EXATA
+    assert juridicas[0]["taxa_de_colisao"] is None, "identidade exata não tem taxa a estimar"
+
+
+def test_estrangeiro_identifica_por_nome_e_pais(config_de_identidade: Config) -> None:
+    """Terceiro caminho: sem documento nenhum, sobra nome e país. Ver ADR-004."""
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", tipo="3", nome="JOHN SMITH", documento="", pais="249"),
+            socio("22222222", tipo="3", nome="JOHN SMITH", documento="", pais="105"),
+        ],
+        paises={"105": "BRASIL", "249": "ESTADOS UNIDOS"},
+    )
+
+    estrangeiros = [
+        linha for linha in ler(resultado.caminho).values() if linha["tipo"] == "estrangeiro"
+    ]
+    assert len(estrangeiros) == 2, "mesmo nome em países diferentes não é a mesma pessoa"
+    assert {str(linha["confianca"]) for linha in estrangeiros} == {FRACA}
+
+
+def test_socio_sem_nome_nao_funde_com_ninguem(config_de_identidade: Config) -> None:
+    """370 vínculos do recorte de SP não têm nome.
+
+    A identidade seria a máscara sozinha, que funde os 48,8 portadores médios de
+    uma máscara da região 8. Cada registro vira um nó — isolar custa nada, fundir
+    é uma afirmação falsa sobre quem é sócio de quem.
+    """
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="", documento="***123456**"),
+            socio("22222222", nome="", documento="***123456**"),
+            socio("33333333", nome="JOSE SILVA", documento="***123456**"),
+        ],
+    )
+
+    identidades = ler(resultado.caminho)
+    sem_nome = [linha for linha in identidades.values() if linha["confianca"] == NAO_FUNDIVEL]
+    assert len(sem_nome) == 2, "mesma máscara, sem nome, empresas diferentes: dois nós"
+    assert all(linha["vinculos_no_recorte"] == 1 for linha in sem_nome)
+    assert dict(resultado.por_confianca)[NAO_FUNDIVEL] == 2
+
+
+def test_tipos_diferentes_nunca_colidem() -> None:
+    """A etiqueta de tipo entra no hash para que um cnpj_basico e um nome que por
+    acaso sejam a mesma string não virem o mesmo nó."""
+    assert identificador("pessoa_juridica", "12345678") != identificador(
+        "pessoa_fisica", "12345678"
+    )
+
+
+# --------------------------------------------- nó externo: conector, não nó
+
+
+def test_socio_juridico_de_fora_entra_marcado(config_de_identidade: Config) -> None:
+    """19% dos vínculos entre empresas apontam para fora do recorte.
+
+    Descartá-los quebraria caminho real: duas paulistas ligadas por uma holding
+    de outra UF deixariam de ter vínculo. Eles entram como conector, e a marca é
+    o que impede alguém de ler o grau deles como o grau real.
+    """
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", tipo="1", nome="HOLDING DE FORA SA", documento="77777777000199"),
+            socio("11111111", tipo="1", nome="ACME SP LTDA", documento="22222222000199"),
+        ],
+        no_recorte=["11111111", "22222222"],
+    )
+
+    juridicas = {
+        str(linha["cnpj_basico"]): linha
+        for linha in ler(resultado.caminho).values()
+        if linha["tipo"] == "pessoa_juridica"
+    }
+    assert juridicas["77777777"]["no_recorte"] is False
+    assert juridicas["22222222"]["no_recorte"] is True
+    assert resultado.externos == 1
+
+
+def test_vinculos_no_recorte_nao_se_chama_grau(config_de_identidade: Config) -> None:
+    """O nome da coluna é o que impede a leitura errada.
+
+    Só ingerimos sócios de empresas do recorte, então quem tem 3 participações em
+    SP e 40 fora aparece com 3. É piso, nunca total — e vale para a Fase 5, onde
+    grau e centralidade são "dentro do recorte", e para a Fase 9, onde "pessoa com
+    participação em N empresas" é afirmação falsa se N for lido como total.
+    """
+    assert "vinculos_no_recorte" in COLUNAS_IDENTIDADES
+    assert "grau" not in COLUNAS_IDENTIDADES
+
+
+# ------------------------------------------------------- taxa e estabilidade
+
+
+def test_taxa_de_colisao_so_existe_onde_e_calculavel(config_de_identidade: Config) -> None:
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="JOSE SILVA", documento="***123458**"),
+            socio("22222222", tipo="1", nome="ACME LTDA", documento="99999999000199"),
+            socio("33333333", tipo="3", nome="JOHN SMITH", documento="", pais="249"),
+        ],
+        paises={"105": "BRASIL", "249": "ESTADOS UNIDOS"},
+    )
+
+    por_confianca = {
+        str(linha["confianca"]): linha["taxa_de_colisao"]
+        for linha in ler(resultado.caminho).values()
+    }
+    assert por_confianca[ESTIMADA] is not None
+    assert por_confianca[EXATA] is None
+    assert por_confianca[FRACA] is None
+
+
+def test_taxa_de_colisao_e_o_simpson_vezes_os_pares_homonimos(
+    config_de_identidade: Config,
+) -> None:
+    """O cálculo conferido contra um caso computável à mão.
+
+    Quatro identidades na região 8, uma máscara repetida e um par homônimo:
+
+        soma de quadrados = 2² + 1² + 1² = 6      colisão = 6 / 4² = 0,375
+        pares homônimos   = C(2,2) = 1           fusões  = 1 x 0,375
+        taxa              = 0,375 / 4 = 0,09375
+
+    As somas são inteiras de propósito: `double` não é associativo, o motor agrega
+    em paralelo, e somar em ponto flutuante fazia o Parquet sair com bytes
+    diferentes a cada execução sobre o mesmo dado.
+    """
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="JOSE SILVA", documento="***111118**"),
+            socio("22222222", nome="JOSE SILVA", documento="***222218**"),
+            socio("33333333", nome="MARIA SOUZA", documento="***111118**"),
+            socio("44444444", nome="ANA LIMA", documento="***333318**"),
+        ],
+    )
+
+    taxas = [
+        linha["taxa_de_colisao"]
+        for linha in ler(resultado.caminho).values()
+        if linha["confianca"] == ESTIMADA
+    ]
+    assert len(taxas) == 4
+    assert all(taxa == pytest.approx(0.09375) for taxa in taxas)
+    assert resultado.fusoes_estimadas == pytest.approx(0.375)
+
+
+def test_cada_regiao_fiscal_tem_a_sua_taxa(config_de_identidade: Config) -> None:
+    """Média única esconderia que o risco é vinte vezes maior na região 8.
+
+    Publicar a média tendo a distribuição é desperdiçar informação já medida, e é
+    o que permite a API dizer a confiança do nó, e não a do conjunto.
+    """
+    resultado = gerar(
+        config_de_identidade,
+        [
+            socio("11111111", nome="JOSE SILVA", documento="***111118**"),
+            socio("22222222", nome="JOSE SILVA", documento="***222218**"),
+            socio("33333333", nome="MARIA SOUZA", documento="***111118**"),
+            socio("44444444", nome="ANA LIMA", documento="***444443**"),
+        ],
+    )
+
+    por_regiao = dict(resultado.taxa_por_regiao)
+    assert set(por_regiao) == {"8", "3"}
+    assert por_regiao["8"] > por_regiao["3"]
+    assert por_regiao["3"] == 0.0, "região com uma identidade só não tem par homônimo"
+
+
+def test_identificador_e_estavel_entre_execucoes(config_de_identidade: Config) -> None:
+    """A Fase 4 indexa por este valor e a Fase 8 promete artefato imutável."""
+    primeiro = gerar(config_de_identidade, [socio("11111111", nome="JOSE DA SILVA")])
+    segundo = gerar_identidades(config_de_identidade)
+
+    assert primeiro.caminho.read_bytes() == segundo.caminho.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "partes",
+    [
+        ("pessoa_fisica", "JOSE SILVA", "***123456**"),
+        ("pessoa_juridica", "12345678"),
+        ("estrangeiro", "JOHN SMITH", "249"),
+        ("nao_fundivel", "11111111", "***123456**", "", ""),
+    ],
+)
+def test_macro_de_identificador_concorda_com_python(partes: tuple[str, ...]) -> None:
+    """Mesma disciplina da normalização: duas implementações, uma regra."""
+    lista = ", ".join(f"'{parte}'" for parte in partes)
+    with duckdb.connect() as conexao:
+        instalar_identificador(conexao)
+        obtido = conexao.execute(f"SELECT identificador([{lista}])").fetchone()
+
+    assert obtido is not None
+    assert obtido[0] == identificador(*partes)
+
+
+def test_esquema_das_identidades_e_o_declarado(config_de_identidade: Config) -> None:
+    resultado = gerar(config_de_identidade, [socio("11111111", nome="JOSE SILVA")])
+
+    with duckdb.connect() as conexao:
+        descricao = conexao.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{resultado.caminho.as_posix()}')"
+        ).fetchall()
+    assert tuple(coluna[0] for coluna in descricao) == COLUNAS_IDENTIDADES
+
+
+def test_sem_socios_a_mensagem_diz_o_que_fazer(tmp_path: Path) -> None:
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    (tmp_path / "silver" / "2026-06").mkdir(parents=True)
+
+    with pytest.raises(SociosAusentesError, match="camada silver"):
+        gerar_identidades(config)
