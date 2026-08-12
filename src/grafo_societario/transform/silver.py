@@ -306,11 +306,11 @@ por regra de dígito corrido, porque a pontuação quebra a sequência.
 
 O quarto é a regra de volume — 5.195.455 registros, 26,28% do recorte — e o limite
 é **dez**, não onze. Onze é o comprimento do CPF, e é o que a decisão original
-previa. A leitura do arquivo achou `LUIZ FIRMINO DA SILVA 6677354881`: nome de
-pessoa seguido de dez dígitos, que é um CPF cujo zero à esquerda se perdeu em
-algum ponto da cadeia. Descer o limite para dez custa a supressão de cerca de 110
-códigos de SCP em 19,7 milhões de registros; mantê-lo em onze custa publicar um
-CPF, e essa troca não é próxima.
+previa. A leitura do arquivo achou nome de pessoa seguido de **dez** dígitos que
+validam como CPF ao serem preenchidos à esquerda — um documento cujo zero inicial
+se perdeu em algum ponto da cadeia. Descer o limite para dez custa a supressão de
+cerca de 110 códigos de SCP em 19,7 milhões de registros; mantê-lo em onze custa
+publicar um CPF, e essa troca não é próxima.
 
 Sequências de doze ou mais dígitos são CNPJ — cinco registros, todos públicos — e
 caem na mesma regra porque separá-las só acrescenta caminho para errar. O
@@ -330,8 +330,9 @@ nove e dois. São 6.530 ocorrências em Empresas, das quais **6.460 validam como
 CPF** ao serem juntadas — 98,9%. Delas, **6.518 escapavam** da regra de dígito
 corrido. No recorte de SP é uma só, e uma pessoa é uma pessoa.
 
-A fonte não deixa dúvida sobre o que são: `GETULIO SOARES CRUZ CPF 177495146-00`,
-`LAZARO FREITAS DE OLIVEIRA C P F 170347796 00`. A palavra vem escrita ao lado.
+A fonte não deixa dúvida sobre o que são: em boa parte dos casos a palavra "CPF"
+vem escrita ao lado, na própria razão social, às vezes soletrada. Os valores reais
+não são reproduzidos aqui nem nos testes, por serem documento de pessoa física.
 
 A supressão aqui é condicionada ao dígito verificador, não à forma: `123456789-99`
 não é CPF e permanece. É a diferença entre suprimir o que é documento e suprimir
@@ -342,8 +343,8 @@ DIGITOS_DE_CPF_ENCURTADO: Final = 9
 
 Onze dígitos menos dois zeros são nove, e nove passa por baixo do limiar de dez.
 São 542 sequências de nove dígitos em Empresas que validam como CPF ao serem
-preenchidas à esquerda, e uma no recorte de SP: `VANDERLEI LORO 886812895`, que
-é `00886812895`.
+preenchidas à esquerda, e **uma** no recorte de SP — nome de pessoa seguido dos
+nove dígitos. O valor não é reproduzido: é documento de pessoa física.
 
 Como no padrão acima, o verificador de dígito é quem decide. Nove dígitos que não
 formam CPF continuam intactos — é o que separa esta regra de baixar o limiar para
@@ -518,8 +519,9 @@ def tipar_empresas(config: Config, competencia: str | None = None) -> EmpresasTi
     supressão precisa acontecer na camada que os artefatos derivam.
 
     **O que sai é o documento, não o nome.** A supressão é cirúrgica: apaga o run
-    de dígitos e deixa o resto da razão social intacto. `ALINE APARECIDA LEITE DE
-    SOUZA 22922853802` vira `ALINE APARECIDA LEITE DE SOUZA [NUMERO SUPRIMIDO]`.
+    de dígitos e deixa o resto da razão social intacto. `FULANO DE TAL 11144477735`
+    viraria `FULANO DE TAL [NUMERO SUPRIMIDO]` — o exemplo é sintético de
+    propósito, porque os reais são nome e CPF de gente.
 
     Isto é julgamento, não consequência óbvia da regra, e as duas saídas divergem
     por completo. Apagar o campo inteiro deixaria 5,2 milhões de empresas — 26% do
@@ -534,8 +536,9 @@ def tipar_empresas(config: Config, competencia: str | None = None) -> EmpresasTi
     comprar privacidade nenhuma. Ver ADR-006.
 
     Dois registros em 19,77 milhões ficam só com a marca, porque a razão social
-    inteira era o documento — `11954952746` e `018.066.169-80`, sem nome ao lado.
-    Não havia nome a preservar, e o desfecho é o certo.
+    inteira era o documento e nada mais — um deles em dígito corrido, outro
+    pontuado, nenhum com nome ao lado. Não havia nome a preservar, e o desfecho é
+    o certo.
 
     **O custo dessa recusa foi medido, e é grande.** O CPF sem máscara da razão
     social identificaria o dono de cada empresário individual, e o projeto recusa

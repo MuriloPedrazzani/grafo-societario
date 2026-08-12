@@ -228,12 +228,16 @@ DOCUMENTOS_DE_PROVA: Final = (
     "12345678901",
     "123.456.789-01",
     "123 456 789 01",
-    "177495146-00",
-    "6677354881",
-    "JOSE DA SILVA 12345678901",
+    "222555888-46",
+    "1234567890",
+    "FULANO DE TAL 12345678901",
 )
-"""Documentos que nenhuma forma declarada pode aceitar. As cinco primeiras são as
-formas que a regra de supressão reconhece; a última é o caso de volume."""
+"""Documentos que nenhuma forma declarada pode aceitar.
+
+Os valores são **sintéticos**, gerados de bases artificiais, e não colhidos do
+dado real: `222555888-46` e `1234567890` validam como CPF pelo dígito verificador
+sem serem o documento de ninguém em particular. Reproduzir um CPF observado aqui
+seria publicá-lo — que é exatamente o que este módulo existe para impedir."""
 
 
 def forma_declarada_recusa_documento(

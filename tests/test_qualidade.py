@@ -38,7 +38,7 @@ from test_silver import (
     socio,
 )
 
-COM_DOCUMENTO = "JOAO DA SILVA 12345678901"
+COM_DOCUMENTO = "FULANO DE TAL 12345678901"
 """Uma razão social com CPF, para o bronze da fixture ter o que o controle
 positivo precisa achar."""
 
@@ -67,10 +67,10 @@ def silver(tmp_path: Path) -> Config:
     gravar_socios(
         config,
         [
-            socio("11111111", nome="MARIA SOUZA", documento="***123458**"),
-            socio("22222222", nome="MARIA SOUZA", documento="***123458**"),
-            socio("22222222", tipo="1", nome="HOLDING SA", documento="33333333000199"),
-            socio("33333333", tipo="3", nome="JOHN SMITH", documento="", pais="249"),
+            socio("11111111", nome="DELTA ECHO", documento="***123458**"),
+            socio("22222222", nome="DELTA ECHO", documento="***123458**"),
+            socio("22222222", tipo="1", nome="HOTEL INDIA SA", documento="33333333000199"),
+            socio("33333333", tipo="3", nome="ECHO FOXTROT", documento="", pais="249"),
         ],
     )
     tipar_socios(config)
@@ -135,13 +135,13 @@ def test_coluna_de_contato_no_silver_reprova(silver: Config) -> None:
 
 @pytest.mark.parametrize(
     "documento",
-    ["12345678901", "123.456.789-01", "177495146-00", "6677354881"],
+    ["12345678901", "123.456.789-01", "222555888-46", "1234567890"],
 )
 def test_documento_solto_em_texto_livre_reprova(silver: Config, documento: str) -> None:
     """As três cláusulas do commit 16, agora como portão do artefato."""
     reescrever(
         artefato(silver, "empresas"),
-        f"SELECT * REPLACE ('PEDRO ALVES {documento}' AS razao_social) FROM t",
+        f"SELECT * REPLACE ('BELTRANO ALFA {documento}' AS razao_social) FROM t",
     )
 
     assert "[documento_no_silver]" in reprovacoes(silver)
@@ -265,7 +265,7 @@ def test_a_mensagem_lista_todas_as_regras_quebradas(silver: Config) -> None:
     reescrever(
         artefato(silver, "empresas"),
         "SELECT * REPLACE (-1::DECIMAL(18,2) AS capital_social, "
-        "'PEDRO ALVES 12345678901' AS razao_social) FROM t",
+        "'BELTRANO ALFA 12345678901' AS razao_social) FROM t",
     )
 
     achados = reprovacoes(silver)

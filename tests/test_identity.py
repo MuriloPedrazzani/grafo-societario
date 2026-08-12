@@ -66,15 +66,15 @@ def test_acento_e_maiuscula_nunca_fundem_pessoas_diferentes() -> None:
 @pytest.mark.parametrize(
     ("cru", "esperado"),
     [
-        ("JOSE DA SILVA", "JOSE SILVA"),
-        ("MARIA APARECIDA DOS SANTOS", "MARIA APARECIDA SANTOS"),
-        ("ANTONIO FERREIRA DA COSTA", "ANTONIO FERREIRA COSTA"),
-        ("JOAO BATISTA DE OLIVEIRA", "JOAO BATISTA OLIVEIRA"),
-        ("RAFAEL DOS SANTOS SILVA", "RAFAEL SANTOS SILVA"),
-        ("LUIZ DI CAVALCANTI", "LUIZ CAVALCANTI"),
-        ("PEDRO E PAULO SOUZA", "PEDRO PAULO SOUZA"),
-        ("MARIA DAS DORES", "MARIA DORES"),
-        ("DA SILVA", "SILVA"),
+        ("ALFA DA BRAVO", "ALFA BRAVO"),
+        ("CHARLIE DELTA DOS ECHO", "CHARLIE DELTA ECHO"),
+        ("FOXTROT GOLF DA HOTEL", "FOXTROT GOLF HOTEL"),
+        ("INDIA JULIETT DE KILO", "INDIA JULIETT KILO"),
+        ("LIMA DOS MIKE NOVEMBER", "LIMA MIKE NOVEMBER"),
+        ("OSCAR DI PAPA", "OSCAR PAPA"),
+        ("QUEBEC E ROMEU SIERRA", "QUEBEC ROMEU SIERRA"),
+        ("TANGO DAS UNIFORM", "TANGO UNIFORM"),
+        ("DA VICTOR", "VICTOR"),
     ],
 )
 def test_particula_e_removida(cru: str, esperado: str) -> None:
@@ -100,22 +100,34 @@ def test_particula_so_sai_como_token_inteiro(cru: str, esperado: str) -> None:
     assert normalizar_nome(cru) == esperado
 
 
-def test_os_sete_casos_reais_que_o_degrau_funde() -> None:
-    """As sete fusões medidas sobre 5.635.007 identidades do recorte de SP.
+def test_os_sete_formatos_que_o_degrau_funde() -> None:
+    """Os sete formatos de par que a remoção de partícula funde.
 
-    Todas com a mesma máscara de CPF, todas a mesma pessoa digitada de dois
-    jeitos. É a evidência direta que sustenta aceitar o degrau — mais forte que o
-    argumento probabilístico, e é ela que este teste preserva.
+    Sete fusões foram medidas sobre 5.635.007 identidades do recorte de SP na
+    competência 2026-06, todas com a mesma máscara de CPF dentro do par — a mesma
+    pessoa digitada de dois jeitos. É a evidência direta que sustenta aceitar o
+    degrau, mais forte que o argumento probabilístico.
+
+    **Os nomes reais não são reproduzidos.** São sete pessoas físicas
+    identificáveis, e travá-las nominalmente num repositório público seria
+    singularizá-las para sempre no histórico — exatamente o que a fixture de
+    Socios foi anonimizada para evitar, e o oposto do que o README promete.
+
+    Os pares abaixo são sintéticos e reproduzem **os mesmos sete padrões**: `DA`
+    em terceira e em segunda posição, `DE` em terceira e em segunda, `DOS` em
+    terceira e em segunda, e a ausência do lado oposto. O que o teste prova — que
+    a regra funde estes formatos — continua provado.
     """
     pares = [
-        ("ANTONIO FERREIRA DA COSTA", "ANTONIO FERREIRA COSTA"),
-        ("APARECIDO DA SILVA", "APARECIDO SILVA"),
-        ("JOAO BATISTA DE OLIVEIRA", "JOAO BATISTA OLIVEIRA"),
-        ("JOSE APARECIDO SANTOS", "JOSE APARECIDO DOS SANTOS"),
-        ("MARIA APARECIDA SILVA", "MARIA APARECIDA DA SILVA"),
-        ("RAFAEL OLIVEIRA SILVA", "RAFAEL DE OLIVEIRA SILVA"),
-        ("RAFAEL DOS SANTOS SILVA", "RAFAEL SANTOS SILVA"),
+        ("ALFA BRAVO DA CHARLIE", "ALFA BRAVO CHARLIE"),
+        ("DELTA DA ECHO", "DELTA ECHO"),
+        ("FOXTROT GOLF DE HOTEL", "FOXTROT GOLF HOTEL"),
+        ("INDIA JULIETT KILO", "INDIA JULIETT DOS KILO"),
+        ("LIMA MIKE NOVEMBER", "LIMA MIKE DA NOVEMBER"),
+        ("OSCAR PAPA QUEBEC", "OSCAR DE PAPA QUEBEC"),
+        ("ROMEU DOS SIERRA TANGO", "ROMEU SIERRA TANGO"),
     ]
+    assert len(pares) == 7
     for um, outro in pares:
         assert normalizar_nome(um) == normalizar_nome(outro), f"{um} != {outro}"
 
@@ -141,7 +153,7 @@ def test_inicial_do_meio_e_preservada() -> None:
 
 def test_sobrenome_do_meio_e_preservado() -> None:
     """Mesma categoria da inicial, e o próximo candidato a ser removido por engano."""
-    assert normalizar_nome("MARIA APARECIDA SILVA") != normalizar_nome("MARIA SILVA")
+    assert normalizar_nome("ALFA BRAVO CHARLIE") != normalizar_nome("ALFA CHARLIE")
 
 
 def test_particula_nao_cresce_sozinha() -> None:
@@ -248,8 +260,8 @@ def test_mesmo_socio_em_duas_empresas_gera_o_mesmo_id(config_de_identidade: Conf
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", nome="JOSE DA SILVA", documento="***123456**"),
-            socio("22222222", nome="JOSE DA SILVA", documento="***123456**"),
+            socio("11111111", nome="FULANO DE TAL", documento="***123456**"),
+            socio("22222222", nome="FULANO DE TAL", documento="***123456**"),
         ],
     )
 
@@ -264,8 +276,8 @@ def test_a_normalizacao_alcanca_a_identidade(config_de_identidade: Config) -> No
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", nome="MARIA APARECIDA DA SILVA", documento="***123456**"),
-            socio("22222222", nome="maria aparecida silva", documento="***123456**"),
+            socio("11111111", nome="ALFA BRAVO DA CHARLIE", documento="***123456**"),
+            socio("22222222", nome="alfa bravo charlie", documento="***123456**"),
         ],
     )
 
@@ -287,8 +299,8 @@ def test_mesma_mascara_com_nomes_diferentes_sao_duas_pessoas(
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", nome="JOSE DA SILVA", documento="***123456**"),
-            socio("22222222", nome="MARIA SOUZA", documento="***123456**"),
+            socio("11111111", nome="FULANO DE TAL", documento="***123456**"),
+            socio("22222222", nome="DELTA ECHO", documento="***123456**"),
         ],
     )
 
@@ -325,8 +337,8 @@ def test_estrangeiro_identifica_por_nome_e_pais(config_de_identidade: Config) ->
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", tipo="3", nome="JOHN SMITH", documento="", pais="249"),
-            socio("22222222", tipo="3", nome="JOHN SMITH", documento="", pais="105"),
+            socio("11111111", tipo="3", nome="ECHO FOXTROT", documento="", pais="249"),
+            socio("22222222", tipo="3", nome="ECHO FOXTROT", documento="", pais="105"),
         ],
         paises={"105": "BRASIL", "249": "ESTADOS UNIDOS"},
     )
@@ -350,7 +362,7 @@ def test_socio_sem_nome_nao_funde_com_ninguem(config_de_identidade: Config) -> N
         [
             socio("11111111", nome="", documento="***123456**"),
             socio("22222222", nome="", documento="***123456**"),
-            socio("33333333", nome="JOSE SILVA", documento="***123456**"),
+            socio("33333333", nome="FULANO DE TAL", documento="***123456**"),
         ],
     )
 
@@ -382,7 +394,7 @@ def test_socio_juridico_de_fora_entra_marcado(config_de_identidade: Config) -> N
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", tipo="1", nome="HOLDING DE FORA SA", documento="77777777000199"),
+            socio("11111111", tipo="1", nome="HOTEL INDIA SA", documento="77777777000199"),
             socio("11111111", tipo="1", nome="ACME SP LTDA", documento="22222222000199"),
         ],
         no_recorte=["11111111", "22222222"],
@@ -417,9 +429,9 @@ def test_taxa_de_colisao_so_existe_onde_e_calculavel(config_de_identidade: Confi
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", nome="JOSE SILVA", documento="***123458**"),
+            socio("11111111", nome="FULANO DE TAL", documento="***123458**"),
             socio("22222222", tipo="1", nome="ACME LTDA", documento="99999999000199"),
-            socio("33333333", tipo="3", nome="JOHN SMITH", documento="", pais="249"),
+            socio("33333333", tipo="3", nome="ECHO FOXTROT", documento="", pais="249"),
         ],
         paises={"105": "BRASIL", "249": "ESTADOS UNIDOS"},
     )
@@ -451,10 +463,10 @@ def test_taxa_de_colisao_e_o_simpson_vezes_os_pares_homonimos(
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", nome="JOSE SILVA", documento="***111118**"),
-            socio("22222222", nome="JOSE SILVA", documento="***222218**"),
-            socio("33333333", nome="MARIA SOUZA", documento="***111118**"),
-            socio("44444444", nome="ANA LIMA", documento="***333318**"),
+            socio("11111111", nome="FULANO DE TAL", documento="***111118**"),
+            socio("22222222", nome="FULANO DE TAL", documento="***222218**"),
+            socio("33333333", nome="DELTA ECHO", documento="***111118**"),
+            socio("44444444", nome="GOLF HOTEL", documento="***333318**"),
         ],
     )
 
@@ -477,10 +489,10 @@ def test_cada_regiao_fiscal_tem_a_sua_taxa(config_de_identidade: Config) -> None
     resultado = gerar(
         config_de_identidade,
         [
-            socio("11111111", nome="JOSE SILVA", documento="***111118**"),
-            socio("22222222", nome="JOSE SILVA", documento="***222218**"),
-            socio("33333333", nome="MARIA SOUZA", documento="***111118**"),
-            socio("44444444", nome="ANA LIMA", documento="***444443**"),
+            socio("11111111", nome="FULANO DE TAL", documento="***111118**"),
+            socio("22222222", nome="FULANO DE TAL", documento="***222218**"),
+            socio("33333333", nome="DELTA ECHO", documento="***111118**"),
+            socio("44444444", nome="GOLF HOTEL", documento="***444443**"),
         ],
     )
 
@@ -492,7 +504,7 @@ def test_cada_regiao_fiscal_tem_a_sua_taxa(config_de_identidade: Config) -> None
 
 def test_identificador_e_estavel_entre_execucoes(config_de_identidade: Config) -> None:
     """A Fase 4 indexa por este valor e a Fase 8 promete artefato imutável."""
-    primeiro = gerar(config_de_identidade, [socio("11111111", nome="JOSE DA SILVA")])
+    primeiro = gerar(config_de_identidade, [socio("11111111", nome="FULANO DE TAL")])
     segundo = gerar_identidades(config_de_identidade)
 
     assert primeiro.caminho.read_bytes() == segundo.caminho.read_bytes()
@@ -501,9 +513,9 @@ def test_identificador_e_estavel_entre_execucoes(config_de_identidade: Config) -
 @pytest.mark.parametrize(
     "partes",
     [
-        ("pessoa_fisica", "JOSE SILVA", "***123456**"),
+        ("pessoa_fisica", "FULANO DE TAL", "***123456**"),
         ("pessoa_juridica", "12345678"),
-        ("estrangeiro", "JOHN SMITH", "249"),
+        ("estrangeiro", "ECHO FOXTROT", "249"),
         ("nao_fundivel", "11111111", "***123456**", "", ""),
     ],
 )
@@ -519,7 +531,7 @@ def test_macro_de_identificador_concorda_com_python(partes: tuple[str, ...]) -> 
 
 
 def test_esquema_das_identidades_e_o_declarado(config_de_identidade: Config) -> None:
-    resultado = gerar(config_de_identidade, [socio("11111111", nome="JOSE SILVA")])
+    resultado = gerar(config_de_identidade, [socio("11111111", nome="FULANO DE TAL")])
 
     with duckdb.connect() as conexao:
         descricao = conexao.execute(

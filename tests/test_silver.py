@@ -541,13 +541,13 @@ def test_cpf_de_onze_digitos_sai_da_razao_social(config_de_silver: Config) -> No
     """26,28% do recorte de SP tem esta forma. É o vazamento de volume da fonte."""
     preparar_empresas(
         config_de_silver,
-        [empresa("11111111", razao_social="JOAO DA SILVA 12345678901", natureza="2135")],
+        [empresa("11111111", razao_social="FULANO DE TAL 12345678901", natureza="2135")],
     )
 
     resultado = tipar_empresas(config_de_silver)
 
     (linha,) = ler_empresas(resultado.caminho)
-    assert linha["razao_social"] == f"JOAO DA SILVA {MARCA_DE_SUPRESSAO}"
+    assert linha["razao_social"] == f"FULANO DE TAL {MARCA_DE_SUPRESSAO}"
     assert resultado.razoes_sociais_suprimidas == 1
 
 
@@ -559,37 +559,38 @@ def test_cpf_pontuado_sai_nas_variantes_que_a_fonte_tem(
     sequência. Foram 42 registros no recorte, e 42 vazamentos são 42 pessoas."""
     preparar_empresas(
         config_de_silver,
-        [empresa("11111111", razao_social=f"MARIA SOUZA {documento}", natureza="2135")],
+        [empresa("11111111", razao_social=f"BELTRANO ALFA {documento}", natureza="2135")],
     )
 
     resultado = tipar_empresas(config_de_silver)
 
     (linha,) = ler_empresas(resultado.caminho)
-    assert linha["razao_social"] == f"MARIA SOUZA {MARCA_DE_SUPRESSAO}"
+    assert linha["razao_social"] == f"BELTRANO ALFA {MARCA_DE_SUPRESSAO}"
 
 
 def test_sequencia_de_dez_digitos_tambem_sai(config_de_silver: Config) -> None:
     """A decisão que a leitura do arquivo mudou.
 
     A regra prevista cobria onze dígitos, o comprimento do CPF. O arquivo trouxe
-    `LUIZ FIRMINO DA SILVA 6677354881` — nome de pessoa e dez dígitos, que é um
-    CPF cujo zero à esquerda se perdeu. Parar em onze publicaria esse CPF.
+    nome de pessoa seguido de dez dígitos que validam como CPF ao serem
+    preenchidos à esquerda — documento cujo zero inicial se perdeu. Parar em
+    onze publicaria esse CPF. O caso abaixo é sintético: o real é de uma pessoa.
     """
     preparar_empresas(
         config_de_silver,
-        [empresa("11111111", razao_social="LUIZ FIRMINO DA SILVA 6677354881", natureza="4120")],
+        [empresa("11111111", razao_social="FULANO DE TAL 1234567890", natureza="4120")],
     )
 
     resultado = tipar_empresas(config_de_silver)
 
     (linha,) = ler_empresas(resultado.caminho)
-    assert linha["razao_social"] == f"LUIZ FIRMINO DA SILVA {MARCA_DE_SUPRESSAO}"
+    assert linha["razao_social"] == f"FULANO DE TAL {MARCA_DE_SUPRESSAO}"
 
 
 def test_cnpj_de_quatorze_digitos_tambem_sai(config_de_silver: Config) -> None:
     """Sobre-supressão deliberada: são 5 registros, o CNPJ é público e já existe
     como coluna própria. Separar o caso só acrescentaria caminho para errar."""
-    preparar_empresas(config_de_silver, [empresa("11111111", razao_social="58254003000131 LTDA")])
+    preparar_empresas(config_de_silver, [empresa("11111111", razao_social="12345678000199 LTDA")])
 
     resultado = tipar_empresas(config_de_silver)
 
@@ -622,16 +623,16 @@ def test_cpf_partido_por_separador_sai(config_de_silver: Config) -> None:
     preparar_empresas(
         config_de_silver,
         [
-            empresa("11111111", razao_social="GETULIO SOARES CRUZ CPF 177495146-00"),
-            empresa("22222222", razao_social="LAZARO FREITAS C P F 170347796 00"),
+            empresa("11111111", razao_social="FULANO DE TAL CPF 222555888-46"),
+            empresa("22222222", razao_social="BELTRANO ALFA C P F 222555888 46"),
         ],
     )
 
     resultado = tipar_empresas(config_de_silver)
 
     linhas = ler_empresas(resultado.caminho)
-    assert linhas[0]["razao_social"] == f"GETULIO SOARES CRUZ CPF {MARCA_DE_SUPRESSAO}"
-    assert linhas[1]["razao_social"] == f"LAZARO FREITAS C P F {MARCA_DE_SUPRESSAO}"
+    assert linhas[0]["razao_social"] == f"FULANO DE TAL CPF {MARCA_DE_SUPRESSAO}"
+    assert linhas[1]["razao_social"] == f"BELTRANO ALFA C P F {MARCA_DE_SUPRESSAO}"
     assert resultado.razoes_sociais_suprimidas == 2
 
 
@@ -656,16 +657,17 @@ def test_nove_mais_dois_que_nao_valida_como_cpf_permanece(config_de_silver: Conf
 def test_cpf_encurtado_de_nove_digitos_sai(config_de_silver: Config) -> None:
     """CPF que perdeu dois zeros à esquerda passa por baixo do limiar de dez.
 
-    `VANDERLEI LORO 886812895` é `00886812895`, e é o único caso do recorte de SP.
+    É um caso no recorte de SP. O exemplo aqui é sintético — `123456797` completa
+    para `00123456797` —, porque o real é o CPF de alguém.
     """
     preparar_empresas(
-        config_de_silver, [empresa("11111111", razao_social="VANDERLEI LORO 886812895")]
+        config_de_silver, [empresa("11111111", razao_social="SICRANO BRAVO 123456797")]
     )
 
     resultado = tipar_empresas(config_de_silver)
 
     (linha,) = ler_empresas(resultado.caminho)
-    assert linha["razao_social"] == f"VANDERLEI LORO {MARCA_DE_SUPRESSAO}"
+    assert linha["razao_social"] == f"SICRANO BRAVO {MARCA_DE_SUPRESSAO}"
     assert resultado.razoes_sociais_suprimidas == 1
 
 
@@ -676,13 +678,15 @@ def test_macro_de_cpf_concorda_com_o_verificador_das_fixtures(tmp_path: Path) ->
     de `test_fixtures` vive em Python porque a fixture é gerada fora do motor. Este
     teste é o que impede as duas de se separarem em silêncio.
     """
+    # Todos sintéticos, gerados de bases artificiais: os quatro primeiros validam
+    # pelo dígito verificador sem serem o documento de ninguém em particular.
     casos = [
         "11144477735",
+        "22255588846",
+        "01234567890",
+        "00123456797",
         "11144477736",
         "11111111111",
-        "17749514600",
-        "00886812895",
-        "06677354881",
         "00123456789",
         "12345678999",
         "12345678901",
@@ -706,11 +710,11 @@ def test_nenhum_padrao_de_documento_sobrevive_no_artefato(config_de_silver: Conf
     preparar_empresas(
         config_de_silver,
         [
-            empresa("11111111", razao_social="JOAO DA SILVA 12345678901", natureza="2135"),
+            empresa("11111111", razao_social="FULANO DE TAL 12345678901", natureza="2135"),
             empresa("22222222", razao_social="MARIA SOUZA 123.456.789-01", natureza="2135"),
-            empresa("33333333", razao_social="ANA LIMA 6677354881", natureza="4120"),
-            empresa("44444444", razao_social="JOSE CRUZ CPF 177495146-00", natureza="2135"),
-            empresa("55555555", razao_social="PEDRO ALVES 886812895", natureza="4120"),
+            empresa("33333333", razao_social="SICRANO BRAVO 1234567890", natureza="4120"),
+            empresa("44444444", razao_social="BELTRANO ALFA CPF 222555888-46", natureza="2135"),
+            empresa("55555555", razao_social="ROMEU DELTA 123456797", natureza="4120"),
         ],
     )
 
@@ -880,14 +884,14 @@ def test_cnpj_basico_repetido_colapsa_preferindo_a_linha_com_mais_dados(
     """O caso real de 08314885: uma linha com dado e um toco vazio.
 
     Escolher pelo tamanho do conteúdo não é elegância — é a diferença entre o
-    artefato ficar com 'FLAVIO PAVAO DE SOUZA' ou com uma razão social nula.
+    artefato ficar com o nome de quem é dono ou com uma razão social nula.
     """
     preparar_empresas(
         config_de_silver,
         [
             empresa(
                 "08314885",
-                razao_social="FLAVIO PAVAO DE SOUZA",
+                razao_social="FULANO DE TAL CHARLIE",
                 natureza="4120",
                 qualificacao="59",
                 capital="0,00",
@@ -909,7 +913,7 @@ def test_cnpj_basico_repetido_colapsa_preferindo_a_linha_com_mais_dados(
     (linha,) = ler_empresas(resultado.caminho)
     assert resultado.registros == 1
     assert resultado.cnpj_basico_repetidos == 1
-    assert linha["razao_social"] == "FLAVIO PAVAO DE SOUZA"
+    assert linha["razao_social"] == "FULANO DE TAL CHARLIE"
     assert linha["natureza_juridica"] == "4120"
 
 
@@ -1068,8 +1072,8 @@ def test_cpf_escondido_em_nome_de_socio_e_suprimido(config_de_silver: Config) ->
     preparar_socios(
         config_de_silver,
         [
-            socio("11111111", tipo="1", nome="CAMILA MIRANDA DA COSTA BORBA 66701910220"),
-            socio("22222222", tipo="1", nome="1000691963 ONTARIO INC."),
+            socio("11111111", tipo="1", nome="FULANO DE TAL 11144477735"),
+            socio("22222222", tipo="1", nome="1000000000 DELTA INC."),
         ],
     )
 
@@ -1078,20 +1082,20 @@ def test_cpf_escondido_em_nome_de_socio_e_suprimido(config_de_silver: Config) ->
     linhas = ler_socios(resultado.caminho)
     nomes = {str(linha["nome_socio_ou_razao_social"]) for linha in linhas}
     assert nomes == {
-        f"CAMILA MIRANDA DA COSTA BORBA {MARCA_DE_SUPRESSAO}",
-        f"{MARCA_DE_SUPRESSAO} ONTARIO INC.",
+        f"FULANO DE TAL {MARCA_DE_SUPRESSAO}",
+        f"{MARCA_DE_SUPRESSAO} DELTA INC.",
     }
     assert resultado.nomes_suprimidos == 2
 
 
 def test_nome_de_socio_sem_documento_permanece(config_de_silver: Config) -> None:
     """Controle negativo: a supressão precisa saber não agir."""
-    preparar_socios(config_de_silver, [socio("11111111", nome="MARIA APARECIDA DE SOUZA")])
+    preparar_socios(config_de_silver, [socio("11111111", nome="BELTRANO ALFA CHARLIE")])
 
     resultado = tipar_socios(config_de_silver)
 
     (linha,) = ler_socios(resultado.caminho)
-    assert linha["nome_socio_ou_razao_social"] == "MARIA APARECIDA DE SOUZA"
+    assert linha["nome_socio_ou_razao_social"] == "BELTRANO ALFA CHARLIE"
     assert resultado.nomes_suprimidos == 0
 
 
@@ -1106,7 +1110,7 @@ def test_preenchedor_de_representante_vira_nulo(config_de_silver: Config) -> Non
         config_de_silver,
         [
             socio("11111111", representante=PREENCHEDOR_DE_DOCUMENTO, nome_representante=""),
-            socio("22222222", representante="***123456**", nome_representante="ANA LIMA"),
+            socio("22222222", representante="***123456**", nome_representante="SICRANO BRAVO"),
         ],
     )
 
@@ -1116,7 +1120,7 @@ def test_preenchedor_de_representante_vira_nulo(config_de_silver: Config) -> Non
     assert por_cnpj["11111111"]["representante_legal"] is None
     assert por_cnpj["11111111"]["nome_representante"] is None
     assert por_cnpj["22222222"]["representante_legal"] == "***123456**"
-    assert por_cnpj["22222222"]["nome_representante"] == "ANA LIMA"
+    assert por_cnpj["22222222"]["nome_representante"] == "SICRANO BRAVO"
     assert resultado.representantes_sem_documento == 1
 
 
@@ -1124,7 +1128,7 @@ def test_estrangeiro_nao_tem_documento_e_isso_e_preservado(config_de_silver: Con
     """Terceiro caminho de identidade: sobra nome e país. Ver ADR-004."""
     preparar_socios(
         config_de_silver,
-        [socio("11111111", tipo="3", nome="JOHN SMITH", documento="", pais="249")],
+        [socio("11111111", tipo="3", nome="ECHO FOXTROT", documento="", pais="249")],
     )
 
     resultado = tipar_socios(config_de_silver)
@@ -1199,7 +1203,7 @@ def test_qualificacoes_sao_decodificadas_pelas_duas_pontas(config_de_silver: Con
                 "11111111",
                 qualificacao="49",
                 representante="***123456**",
-                nome_representante="ANA LIMA",
+                nome_representante="SICRANO BRAVO",
                 qualificacao_representante="50",
             )
         ],

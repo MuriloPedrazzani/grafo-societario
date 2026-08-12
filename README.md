@@ -16,7 +16,7 @@ Responder uma pergunta simples — *"estas duas empresas têm algum vínculo soc
 
 ## A proposta
 
-Um pipeline reprodutível que transforma os arquivos brutos da Receita Federal em um grafo consultável, e uma API que responde em milissegundos:
+Um pipeline reprodutível que transforme os arquivos brutos da Receita Federal em um grafo consultável, e uma API capaz de responder em milissegundos:
 
 - existe caminho societário entre a empresa A e a empresa B?
 - qual é esse caminho?
@@ -28,18 +28,20 @@ Estas restrições são deliberadas e moldam toda a arquitetura:
 
 | Restrição | Implicação |
 |---|---|
-| Roda em 8 GB de RAM | Nada de cluster; processamento *out-of-core* com DuckDB |
+| Roda em 8 GB de RAM | Nada de cluster; processamento *out-of-core* com DuckDB — pico medido de 1,83 GiB |
 | Custo zero (free tier) | Sem banco de grafo gerenciado, sem orquestrador dedicado |
-| Artefato de deploy ≤ 500 MB | Grafo serializado em arrays CSR lidos via `mmap` |
+| Artefato de deploy ≤ 500 MB | Grafo a serializar em arrays CSR lidos via `mmap` (Fase 4) |
 | Recorte por UF da matriz | Parametrizável; o padrão é SP |
 
 ## Privacidade
 
-O quadro societário inclui nomes de pessoas físicas. A API pública **pseudonimiza pessoas físicas por padrão** — elas aparecem como identificadores opacos, nunca como nomes. O código é aberto: quem precisar dos nomes reais executa o pipeline localmente com os dados originais.
+O quadro societário inclui nomes de pessoas físicas.
 
-Três decisões concretas sustentam isso:
+**Compromisso de desenho, ainda não construído (Fase 6):** a API pública pseudonimizará pessoas físicas por padrão — elas aparecerão como identificadores opacos, nunca como nomes. O código é aberto: quem precisar dos nomes reais executa o pipeline localmente com os dados originais.
 
-**O CPF sai na transformação, não na resposta da API.** A Receita mascara o CPF em toda parte onde teve a chance, mas ele escapa sem máscara dentro da razão social de empresário individual — em **5,2 milhões** de registros só no recorte de São Paulo, 26% do total. Como os artefatos deste projeto são publicados em Release e em imagem Docker, mascarar na resposta não desfaria nada: o dado já teria saído. A supressão acontece na camada que gera os artefatos, e um portão de qualidade varre todos eles antes da publicação, com o varredor validado contra o dado bruto para provar que sabe achar.
+**Já construído e verificável hoje**, na camada de transformação:
+
+**O CPF sai na transformação, e não dependerá da resposta da API.** A Receita mascara o CPF em toda parte onde teve a chance, mas ele escapa sem máscara dentro da razão social de empresário individual — em **5,2 milhões** de registros só no recorte de São Paulo, 26% do total. Como os artefatos deste projeto são publicados em Release e em imagem Docker, mascarar na resposta não desfaria nada: o dado já teria saído. A supressão acontece na camada que gera os artefatos, e um portão de qualidade varre todos eles antes da publicação, com o varredor validado contra o dado bruto para provar que sabe achar.
 
 **O CPF sem máscara é recusado como identificador.** Ele existe no dado de origem e permitiria identificar o dono de cada empresário individual. Usá-lo seria reidentificação em escala de milhões de pessoas, a partir de uma falha da fonte. O custo dessa recusa está medido: das 19,77 milhões de empresas do recorte, **14,79 milhões (74,8%) não têm nenhum sócio registrado**, porque o dono do empresário individual está dentro do nome da empresa e o projeto decidiu não extraí-lo. São nós que caminho societário nenhum atravessa — é o preço, e ele é grande.
 
@@ -95,26 +97,27 @@ Vale também para as empresas de fora que entram como conectores: uma holding de
 Receita Federal (ZIP/CSV)
         │
         ▼
-   [ ingestão ]  download com retry, cache e verificação de integridade
+   [ ingestão ]  download com retry, cache e verificação de integridade   ✔ pronto
         │
         ▼
-   [ bronze ]    CSV → Parquet, fiel à origem, tudo como texto
+   [ bronze ]    CSV → Parquet, fiel à origem, tudo como texto            ✔ pronto
         │
         ▼
-   [ silver ]    tipagem, recorte por UF, decodificação, identidade de sócios
+   [ silver ]    tipagem, recorte por UF, decodificação, identidade       ✔ pronto
         │
         ▼
-   [ grafo ]     arestas → arrays CSR (.npy) + componentes conexos
+   [ grafo ]     arestas → arrays CSR (.npy) + componentes conexos        Fase 4
         │
         ▼
-   [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap
+   [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap        Fase 6
 ```
 
-Decisões arquiteturais e seus trade-offs estão documentados em [`docs/adr/`](docs/adr/).
+As decisões estão registradas hoje nos módulos que as implementam e nas mensagens de commit, que explicam o porquê de cada uma. Os ADRs formais, em `docs/adr/`, são escritos na Fase 8 — inclusive o da recusa de usar o CPF sem máscara, com o custo medido.
 
 ## Stack
 
-`Python` · `DuckDB` · `Parquet` · `NumPy/SciPy` · `FastAPI` · `Cytoscape.js` · `Docker` · `GitHub Actions`
+Em uso: `Python` · `DuckDB` · `Parquet` · `GitHub Actions`
+Previsto: `NumPy/SciPy` (Fase 4) · `FastAPI` (Fase 6) · `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
 
 ---
 

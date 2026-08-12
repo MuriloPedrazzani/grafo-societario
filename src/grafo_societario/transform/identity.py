@@ -25,9 +25,13 @@ dado poderia torná-los perigosos. Entram.
 `E`. Não distinguem pessoas; distinguem estilos de preenchimento de formulário.
 Não são seguros por construção, então foram **medidos**: sobre 5.635.007
 identidades, a remoção funde **sete**, e as sete são a mesma pessoa digitada de
-dois jeitos, com a mesma máscara de CPF — `MARIA APARECIDA SILVA` e `MARIA
-APARECIDA DA SILVA`, `RAFAEL OLIVEIRA SILVA` e `RAFAEL DE OLIVEIRA SILVA`. Sem
-o degrau, essas sete pessoas ficariam como catorze nós. Entra.
+dois jeitos, com a mesma máscara de CPF: pares que diferem apenas por um `DA`, um
+`DE` ou um `DOS` a mais. Sem o degrau, essas sete pessoas ficariam como catorze
+nós. Entra.
+
+Os nomes reais dos sete não aparecem aqui nem nos testes. São pessoas físicas
+identificáveis, e este é um repositório público — os testes reproduzem os mesmos
+padrões com nomes sintéticos.
 
 **Tipo 3 — informação.** Inicial do meio, sobrenome intermediário, apelido. A
 inicial existe **para** distinguir: é o que separa `JOSE C SILVA` de `JOSE A
