@@ -36,3 +36,4 @@ repos:
           - duckdb>=1.1
           - numpy>=2.0
           - scipy-stubs>=1.14
+          - types-psutil>=6.0
