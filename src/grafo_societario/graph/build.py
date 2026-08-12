@@ -82,6 +82,7 @@ COLUNAS_NOS: Final = (
     "nome",
     "cnpj_basico",
     "cpf_mascarado",
+    "regiao_fiscal",
     "pais",
     "no_recorte",
     "confianca",
@@ -100,6 +101,15 @@ ordenação é estrita e sem repetição, que é o que garante que a linha `k` �
 """
 
 TIPO_DE_EMPRESA: Final = TIPOS["1"]
+
+POSICAO_DA_REGIAO: Final = 9
+"""Onde a região fiscal aparece na máscara `***DDDDDD**`.
+
+É o nono caractere, e o nono dígito do CPF: o mascaramento da Receita deixa
+justamente esse à mostra. Num recorte de SP ele é `8` em 86,65% dos sócios, o que
+reduz o espaço efetivo da máscara de 10⁶ para 132.705 e faz a taxa de colisão
+variar vinte vezes entre regiões. Ver `transform.identity`.
+"""
 
 TIPOS_DE_PESSOA_FISICA: Final = (TIPOS["2"], TIPOS["3"])
 """Os dois tipos de nó que são gente: pessoa física e estrangeiro.
@@ -129,6 +139,27 @@ def _nome_publicavel(expor_pf: bool) -> str:
         return "nome"
     pessoas = ", ".join(f"'{tipo}'" for tipo in TIPOS_DE_PESSOA_FISICA)
     return f"CASE WHEN tipo IN ({pessoas}) THEN NULL ELSE nome END"
+
+
+def _mascara_publicavel(expor_pf: bool) -> str:
+    """Expressão do CPF mascarado, conforme o artefato vá ser publicado ou não.
+
+    **A máscara é chave de junção de volta à fonte.** Com `***123456**` e o fato
+    de o nó ser sócio da empresa X, recupera-se o nome no arquivo `Socios` da
+    própria Receita — que é público. Nó pseudonimizado que carrega a chave de
+    busca não está pseudonimizado; é a mesma falha de categoria do nome, num campo
+    menor e mais fácil de justificar.
+
+    Ela também não é necessária ali. O que a API precisa dizer sobre a confiança
+    da identidade é a taxa de colisão, e essa depende apenas do dígito de região
+    fiscal — que vai em coluna própria. Um dígito no lugar de seis: a
+    funcionalidade fica, a identificabilidade sai.
+
+    Com `EXPOR_PF=true`, em execução local sobre os dados originais, a máscara
+    permanece: lá ela não é chave para nada que já não esteja aberto na mesma
+    máquina.
+    """
+    return "cpf_mascarado" if expor_pf else "CAST(NULL AS VARCHAR)"
 
 
 class ErroDeGrafo(RuntimeError):
@@ -308,7 +339,10 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
             f"""
             COPY (
               SELECT identificador, tipo, {_nome_publicavel(config.expor_pf)} AS nome,
-                     cnpj_basico, cpf_mascarado, pais, no_recorte, confianca, taxa_de_colisao
+                     cnpj_basico,
+                     {_mascara_publicavel(config.expor_pf)} AS cpf_mascarado,
+                     substr(cpf_mascarado, {POSICAO_DA_REGIAO}, 1) AS regiao_fiscal,
+                     pais, no_recorte, confianca, taxa_de_colisao
               FROM (
                 SELECT
                   coalesce(e.identificador, i.identificador) AS identificador,

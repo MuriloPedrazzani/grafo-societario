@@ -331,6 +331,56 @@ def test_artefato_publicavel_nao_carrega_nome_de_pessoa_fisica(silver: Config) -
     assert resultado.expor_pf is False
 
 
+def test_artefato_publicavel_nao_carrega_a_mascara_do_cpf(silver: Config) -> None:
+    """A máscara é chave de junção de volta ao `Socios` da Receita.
+
+    Com `***123456**` e a empresa de que o nó é sócio, recupera-se o nome na fonte
+    original, que é pública. Nó pseudonimizado que carrega a chave de busca não
+    está pseudonimizado.
+    """
+    resultado = gerar_nos(silver)
+
+    fisicas = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_fisica"]
+    assert fisicas, "a fixture precisa ter pessoa física"
+    assert all(linha["cpf_mascarado"] is None for linha in fisicas)
+
+
+def test_regiao_fiscal_substitui_a_mascara(silver: Config) -> None:
+    """Um dígito no lugar de seis: a funcionalidade fica, a identificabilidade sai.
+
+    A taxa de colisão por nó depende só da região fiscal, então é ela que precisa
+    ser publicável — e sozinha ela não junta com nada.
+    """
+    resultado = gerar_nos(silver)
+
+    fisicas = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_fisica"]
+    assert [linha["regiao_fiscal"] for linha in fisicas] == ["8"]
+    assert all(linha["taxa_de_colisao"] is not None for linha in fisicas)
+
+
+def test_regiao_fiscal_permanece_com_expor_pf(silver: Config) -> None:
+    """O esquema é o mesmo nos dois modos: consumidor que lê o artefato local não
+    pode precisar de outro código para ler o publicado."""
+    local = silver.model_copy(update={"expor_pf": True})
+
+    resultado = gerar_nos(local)
+
+    fisicas = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_fisica"]
+    assert fisicas[0]["cpf_mascarado"] == "***123458**"
+    assert fisicas[0]["regiao_fiscal"] == "8"
+
+
+def test_pessoa_juridica_nao_tem_regiao_fiscal(silver: Config) -> None:
+    """Região fiscal é dígito de CPF. Empresa não tem, e inventar seria pior que
+    devolver nulo."""
+    resultado = gerar_nos(silver)
+
+    juridicas = [
+        linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_juridica"
+    ]
+    assert all(linha["regiao_fiscal"] is None for linha in juridicas)
+
+
 def test_razao_social_de_pessoa_juridica_permanece(silver: Config) -> None:
     """A distinção não mudou: nome legal do negócio sai em nota fiscal e no cartão
     CNPJ. Apagá-lo custaria utilidade sem comprar privacidade."""
