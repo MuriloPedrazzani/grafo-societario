@@ -4,7 +4,7 @@
 
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
-> **Status:** em desenvolvimento — Fase 4 de 9. Este README é atualizado a cada fase concluída.
+> **Status:** em desenvolvimento — Fase 5 de 9. Este README é atualizado a cada fase concluída.
 
 ---
 
@@ -125,6 +125,38 @@ Vale também para as empresas de fora que entram como conectores: uma holding de
 
 ---
 
+## Seis graus de separação não valem aqui
+
+A intuição é conhecida: duas pessoas quaisquer estariam a seis conhecidos de distância. Ela vem de **rede densa**, e o grafo societário não é uma. Medido sobre 60.000 pares aleatórios dentro do maior componente:
+
+| | saltos |
+|---|---:|
+| mediana | **20** |
+| p95 | 32 |
+| p99 | 38 |
+| máximo observado | **57** |
+
+**Apenas 0,55% dos pares estão a até seis saltos.** A até dez, 2,50%.
+
+A consequência é de produto, não de curiosidade. Um limite de profundidade herdado da intuição responderia *"não procurei tão fundo"* a **99,45%** das consultas que chegam a percorrer o grafo — e responderia isso com aparência de resposta. Por isso a profundidade máxima é argumento obrigatório na busca, sem valor padrão: um número errado ali não falha alto.
+
+### O retrato honesto: a maior parte do recorte é uma empresa e um sócio
+
+Estatística de grafo sem denominador rotulado engana, então aqui vão os dois:
+
+| | valor | sobre o quê |
+|---|---:|---|
+| grau médio | **1,63** | o grafo inteiro, 10.658.250 nós |
+| grau médio | **2,79** | só o maior componente, 1.343.694 nós |
+| grau mediano | **1** | o grafo inteiro |
+| nós com grau exatamente 1 | **6.487.439 — 60,9%** | o grafo inteiro |
+
+Os dois graus médios estão certos; o que muda é o conjunto. Citar 2,79 como "o grau médio do grafo" seria falso, e citar 1,63 como característica do componente gigante também.
+
+**60,9% dos nós são folha.** Somando aos 2,84 milhões de componentes com mediana de tamanho 3, o retrato é este: a maior parte do recorte são empresas pequenas, com um ou dois sócios, ligadas a mais nada. O componente gigante é interessante justamente por ser **minoria** — 12,61% dos nós —, e não por ser o caso típico.
+
+---
+
 ## Arquitetura
 
 ```
@@ -143,6 +175,9 @@ Receita Federal (ZIP/CSV)
    [ grafo ]     arestas → arrays CSR (.npy) + componentes conexos        ✔ pronto
         │
         ▼
+   [ busca ]     caminho societário, vizinhança de k saltos, métricas     ✔ pronto
+        │
+        ▼
    [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap        Fase 6
 ```
 
@@ -157,7 +192,7 @@ Previsto: `FastAPI` (Fase 6) · `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
 
 ## Reprodução
 
-Aquisição, bronze, silver e grafo já funcionam ponta a ponta. A API chega na Fase 6.
+Aquisição, bronze, silver, grafo e busca já funcionam ponta a ponta. A API chega na Fase 6.
 
 ```bash
 pip install -e ".[dev]"
@@ -262,6 +297,46 @@ cadeia só concordam por coincidência se ambas estiverem certas.
 
 Os artefatos são **determinísticos**: duas execuções sobre o mesmo dado produzem
 os mesmos bytes, conferidos por SHA-256.
+
+### A busca sobre o grafo
+
+Caminho societário por busca bidirecional em largura, vizinhança de k saltos, e
+métricas de rede. Medido na competência 2026-06:
+
+| consulta | tempo |
+|---|---:|
+| par aleatório do grafo | **0,26 ms** — 98,3% saem do rótulo de componente, sem percorrer nada |
+| par dentro do maior componente | **5,6 ms** na mediana, 110 ms no pior caso de 6.500 |
+| vizinhança de 3 saltos, teto de 500 nós | 0,23 ms |
+
+**A resposta negativa é a mais barata e a mais comum.** Dois nós em componentes
+diferentes não podem ter caminho, e isso se responde comparando dois inteiros.
+Percorrer o grafo até esgotar para descobrir que não há caminho seria o
+desperdício mais caro possível — e é o caso mais frequente.
+
+**Quatro desfechos, e só um afirma ausência.** `COMPONENTES_DIFERENTES` diz que
+não há caminho; `ALEM_DO_LIMITE` e `ORCAMENTO_EXCEDIDO` dizem que **há**, e que
+esta busca não o entregou. Colapsar os três em "não encontrado" faria o serviço
+afirmar que duas empresas não têm vínculo quando a verdade é "não procurei até lá"
+ou "desisti no meio".
+
+**A poda por grau foi medida e recusada.** Ela removeria arestas que existem — um
+caminho legítimo pelo contador de três mil empresas deixaria de ser encontrado. E
+a medição derrubou a premissa que a motivava: partir do maior hub custa 107 ms e
+partir de um nó qualquer custa 109 ms. O limite que entrou no lugar é orçamento de
+nós visitados, com desfecho próprio, e a justificativa dele é a cobertura da
+amostra e não o custo observado.
+
+**A vizinhança devolve o subgrafo induzido, não a árvore de busca.** Em 65% das
+consultas de 3 saltos há aresta entre nós do mesmo nível — o ciclo que a árvore
+esconderia, e que é justamente o achado de quem investiga: duas empresas ligadas
+por um segundo sócio em comum. O corte por teto acontece por nível inteiro, e a
+resposta diz quantos nós tinha o nível recusado.
+
+**As métricas são derivadas, não gravadas.** Grau sai de `indptr`, tamanho de
+componente sai de um `bincount`, ranking de hubs é ordenação sobre grau derivado.
+Zero byte acrescentado ao artefato, e há teste que confere isso comparando o
+diretório antes e depois.
 
 A configuração vive em variáveis de ambiente — veja [`.env.example`](.env.example).
 `COMPETENCIA` é a única obrigatória.
