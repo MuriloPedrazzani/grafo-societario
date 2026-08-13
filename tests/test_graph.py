@@ -16,6 +16,7 @@ import pytest
 
 from grafo_societario.config import Config
 from grafo_societario.graph.build import (
+    ARQUIVO_DOS_IDENTIFICADORES,
     COLUNAS_ARESTAS,
     COLUNAS_NOS,
     SENTINELA_DE_QUALIFICACAO,
@@ -38,6 +39,7 @@ from grafo_societario.graph.build import (
     validar_extremos_conhecidos,
     validar_indice_denso,
     validar_indice_na_faixa,
+    validar_mesma_ordem,
     validar_qualificacao_cabe_em_int8,
     validar_simetria,
     validar_vizinhos_ordenados,
@@ -196,7 +198,9 @@ def test_o_arquivo_esta_ordenado_por_identificador(silver: Config) -> None:
     deixa de ser o nó k e o CSR passa a endereçar outro nó."""
     resultado = gerar_nos(silver)
 
-    identificadores = [str(linha["identificador"]) for linha in ler_nos(resultado.caminho)]
+    identificadores = [
+        str(linha["identificador"]) for linha in ler_nos(resultado.caminho_dos_identificadores)
+    ]
     assert identificadores == sorted(identificadores)
     assert len(set(identificadores)) == resultado.nos
 
@@ -1201,3 +1205,162 @@ def test_o_csr_e_deterministico(silver: Config) -> None:
         )
     ]
     assert depois == antes
+
+
+# ------------- o identificador de pessoa física sai do artefato publicável
+
+
+def test_o_artefato_publicavel_nao_carrega_identificador_de_pessoa_fisica(
+    silver: Config,
+) -> None:
+    """O identificador de PF é reversível com a fonte aberta da Receita.
+
+    Ele é `sha256(tipo | nome normalizado | CPF mascarado)`, e as duas entradas
+    estão no arquivo `Socios`, que é público. Quem tem a fonte computa o hash de
+    cada pessoa e monta o mapa inverso — não é quebra de hash, é enumeração de um
+    domínio aberto. Reprova no mesmo teste que derrubou a máscara de CPF: chave de
+    junção de volta à fonte não é pseudônimo.
+    """
+    assert silver.expor_pf is False, "o padrão é o modo publicável"
+
+    resultado = gerar_nos(silver)
+
+    por_tipo: dict[str, list[object]] = {}
+    for linha in ler_nos(resultado.caminho):
+        por_tipo.setdefault(str(linha["tipo"]), []).append(linha["identificador"])
+    assert all(valor is None for valor in por_tipo["pessoa_fisica"])
+
+
+def test_o_identificador_de_pessoa_juridica_permanece(silver: Config) -> None:
+    """Ele deriva do `cnpj_basico`, que é o identificador público da empresa, e
+    não revela nada que o CNPJ já não revele."""
+    resultado = gerar_nos(silver)
+
+    juridicas = [
+        linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_juridica"
+    ]
+    assert juridicas
+    assert all(linha["identificador"] is not None for linha in juridicas)
+    assert {str(linha["identificador"]) for linha in juridicas} >= {no_da_empresa("11111111")}
+
+
+def test_estrangeiro_tambem_perde_o_identificador(tmp_path: Path) -> None:
+    """Ele entra na regra por ser pessoa, como em nome e máscara."""
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    gravar_estabelecimentos(config, [estabelecimento("11111111")])
+    aplicar_recorte_por_uf(config)
+    gravar_empresas(config, [empresa("11111111", razao_social="ALFA LTDA")])
+    _gravar_dominio(config, "Naturezas", NATUREZAS_PADRAO)
+    _gravar_dominio(config, "Qualificacoes", QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", PAISES_PADRAO)
+    tipar_empresas(config)
+    gravar_socios(
+        config, [socio("11111111", tipo="3", nome="ECHO FOXTROT", documento="", pais="249")]
+    )
+    tipar_socios(config)
+    gerar_identidades(config)
+
+    resultado = gerar_nos(config)
+
+    estrangeiros = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "estrangeiro"]
+    assert len(estrangeiros) == 1
+    assert estrangeiros[0]["identificador"] is None
+
+
+def test_com_expor_pf_o_identificador_permanece(silver: Config) -> None:
+    """O esquema é o mesmo nos dois modos; o que muda é o que está preenchido."""
+    local = silver.model_copy(update={"expor_pf": True})
+
+    resultado = gerar_nos(local)
+
+    fisicas = [linha for linha in ler_nos(resultado.caminho) if linha["tipo"] == "pessoa_fisica"]
+    assert fisicas
+    assert all(linha["identificador"] is not None for linha in fisicas)
+
+
+def test_o_arquivo_interno_conserva_todos_os_identificadores(silver: Config) -> None:
+    """A construção precisa deles para ligar aresta a nó; quem recebe o artefato,
+    não. O arquivo é local e nunca publicado, como o bronze."""
+    resultado = gerar_nos(silver)
+
+    internos = [
+        str(linha["identificador"]) for linha in ler_nos(resultado.caminho_dos_identificadores)
+    ]
+    assert len(internos) == resultado.nos
+    assert all(valor for valor in internos), "nenhum nulo no arquivo interno"
+    assert resultado.caminho_dos_identificadores.name == ARQUIVO_DOS_IDENTIFICADORES
+
+
+def test_os_dois_arquivos_descrevem_o_mesmo_conjunto(silver: Config) -> None:
+    """Fora de sincronia, o índice de um não endereça o outro e o grafo liga nós
+    trocados sem nada falhar."""
+    resultado = gerar_nos(silver)
+
+    publicaveis = ler_nos(resultado.caminho)
+    internos = ler_nos(resultado.caminho_dos_identificadores)
+    assert len(publicaveis) == len(internos) == resultado.nos
+    # Onde o identificador sobreviveu no publicável, ele bate posição a posição.
+    for publicavel, interno in zip(publicaveis, internos, strict=True):
+        if publicavel["identificador"] is not None:
+            assert publicavel["identificador"] == interno["identificador"]
+
+
+def test_as_arestas_continuam_ligando_os_nos_certos(silver: Config) -> None:
+    """O fix não pode ter quebrado a construção: a aresta ainda liga os índices
+    corretos, agora pelo arquivo interno."""
+    nos = gerar_nos(silver)
+    indice = indice_por_identificador(nos.caminho)
+
+    resultado = gerar_arestas(silver)
+
+    esperada = (indice[no_da_empresa("11111111")], indice[no_da_empresa("22222222")])
+    assert esperada in {(empresa, socio) for empresa, socio, _ in ler_arestas(resultado.caminho)}
+
+
+def gravar_um_identificador(caminho: Path, valores: str) -> Path:
+    with duckdb.connect() as conexao:
+        conexao.execute(
+            f"COPY (SELECT * FROM (VALUES {valores}) AS t(identificador)) "
+            f"TO '{caminho.as_posix()}' (FORMAT PARQUET)"
+        )
+    return caminho
+
+
+def test_ordem_divergente_entre_os_dois_arquivos_e_recusada(tmp_path: Path) -> None:
+    """O caso construído para reprovar, e ele é o defeito que de fato aconteceu.
+
+    Uma versão desta guarda só comparava contagem, apoiada em que os dois arquivos
+    saem da mesma tabela com o mesmo `ORDER BY`. O raciocínio estava certo e a
+    implementação não: o `ORDER BY identificador` do publicável resolvia para o
+    alias de saída, que é a expressão já anulada, e ordenava por ela. Contagens
+    iguais, arquivos válidos, ordens diferentes.
+    """
+    publicavel = gravar_um_identificador(tmp_path / "nos.parquet", "('aa'), ('cc'), ('bb')")
+    interno = gravar_um_identificador(
+        tmp_path / ARQUIVO_DOS_IDENTIFICADORES, "('aa'), ('bb'), ('cc')"
+    )
+
+    with duckdb.connect() as conexao, pytest.raises(IndiceNaoDensoError, match="mesma posição"):
+        validar_mesma_ordem(conexao, publicavel, interno)
+
+
+def test_contagem_diferente_e_recusada(tmp_path: Path) -> None:
+    publicavel = gravar_um_identificador(tmp_path / "nos.parquet", "('aa'), ('bb')")
+    interno = gravar_um_identificador(
+        tmp_path / ARQUIVO_DOS_IDENTIFICADORES, "('aa'), ('bb'), ('cc')"
+    )
+
+    with duckdb.connect() as conexao, pytest.raises(IndiceNaoDensoError):
+        validar_mesma_ordem(conexao, publicavel, interno)
+
+
+def test_nulo_no_publicavel_nao_conta_como_divergencia(tmp_path: Path) -> None:
+    """Controle positivo: pessoa física perde o identificador de propósito, e a
+    guarda não pode confundir isso com desalinhamento."""
+    publicavel = gravar_um_identificador(tmp_path / "nos.parquet", "('aa'), (NULL), ('cc')")
+    interno = gravar_um_identificador(
+        tmp_path / ARQUIVO_DOS_IDENTIFICADORES, "('aa'), ('bb'), ('cc')"
+    )
+
+    with duckdb.connect() as conexao:
+        validar_mesma_ordem(conexao, publicavel, interno)

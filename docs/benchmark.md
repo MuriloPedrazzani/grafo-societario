@@ -2,24 +2,24 @@
 
 > Gerado por `grafo_societario.graph.benchmark`. Competência
 > **2026-06**, `UF_ALVO=SP`, medido em
-> 2026-08-12. Máquina: 20 núcleos lógicos, 16 GiB de RAM, Windows 10, Python 3.11.9.
+> 2026-08-13. Máquina: 20 núcleos lógicos, 16 GiB de RAM, Windows 10, Python 3.11.9.
 
 ## Fase 4 — do silver ao grafo consultável
 
 | Etapa | Tempo | Residente na entrada | Pico | Produziu |
 |---|---:|---:|---:|---|
-| nós com índice denso | 10,4 s | 87 MiB | **4.270 MiB** | 10.658.250 nós · 14.791.390 isoladas |
-| arestas sócio-empresa | 7,3 s | 192 MiB | **2.787 MiB** | 8.699.764 vínculos · 8.699.585 pares |
-| serialização em CSR | 9,0 s | 538 MiB | **1.488 MiB** | 8.689.882 arestas · 17.379.764 posições |
-| componentes conexos | 4,5 s | 127 MiB | **771 MiB** | 2.841.365 componentes · gigante de 1.343.694 |
+| nós com índice denso | 11,6 s | 86 MiB | **4.372 MiB** | 10.658.250 nós · 14.791.390 isoladas |
+| arestas sócio-empresa | 4,1 s | 136 MiB | **2.943 MiB** | 8.699.764 vínculos · 8.699.585 pares |
+| serialização em CSR | 6,1 s | 558 MiB | **1.490 MiB** | 8.689.882 arestas · 17.379.764 posições |
+| componentes conexos | 3,7 s | 137 MiB | **780 MiB** | 2.841.365 componentes · gigante de 1.343.694 |
 
-**Total de 31,2 s**, com pico de memória residente de
-**4,17 GiB** — 52,1% do teto de 8 GiB que o projeto promete.
+**Total de 25,5 s**, com pico de memória residente de
+**4,27 GiB** — 53,4% do teto de 8 GiB que o projeto promete.
 
 O pico é **amostrado a cada 50 ms enquanto a etapa roda**, e não lido depois que
 ela termina. A diferença não é sutil: lida no fim, a primeira etapa reporta uma
 residente modesta, porque a essa altura o motor já devolveu o que tinha pegado. O
-que ela realmente exigiu da máquina foi **4.270 MiB**.
+que ela realmente exigiu da máquina foi **4.372 MiB**.
 
 A coluna de entrada existe porque as quatro etapas rodam no mesmo processo e o
 DuckDB não devolve ao sistema tudo o que reserva. O pico absoluto é o que a
@@ -39,16 +39,16 @@ bronze faz, é barato em qualquer volume.
 
 | Artefato | Bytes | MiB |
 |---|---:|---:|
-| `nos.parquet` | 191.706.130 | 182,83 |
+| `nos.parquet` | 146.792.173 | 139,99 |
 | `existencia.npy` | 79.082.600 | 75,42 |
 | `indptr.npy` | 42.633.132 | 40,66 |
 | `indices.npy` | 69.519.184 | 66,30 |
 | `qualificacoes.npy` | 17.379.892 | 16,57 |
 | `componentes.npy` | 42.633.128 | 40,66 |
-| **total** | **442.954.066** | **422,4** |
+| **total** | **398.040.109** | **379,6** |
 
 Contra o teto de 500 MB, sobra
-**11,4%**. `arestas.parquet` não entra na
+**20,4%**. `arestas.parquet` não entra na
 conta: é insumo do CSR, e não é consultado em tempo de resposta.
 
 ## Antes da Fase 4
@@ -79,7 +79,7 @@ argumento.
 
 **No plano pago, o piso é US$ 65/mês**: a menor instância, de
 1 GiB, a US$ 65 por GiB/mês. É piso e não estimativa — os
-422,4 MiB de artefato deste projeto não
+379,6 MiB de artefato deste projeto não
 guardam índice nenhum nem propriedade de nó, e um banco de grafo guarda os dois.
 São US$ 780/ano no melhor caso, contra **R$ 0**.
 

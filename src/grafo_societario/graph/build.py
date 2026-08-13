@@ -155,6 +155,18 @@ ordenação é estrita e sem repetição, que é o que garante que a linha `k` �
 `k`.
 """
 
+ARQUIVO_DOS_IDENTIFICADORES: Final = "identificadores.parquet"
+"""O par interno de `nos.parquet`: um identificador por nó, na mesma ordem.
+
+**Local, e nunca publicado** — mesmo tratamento do bronze, e pela mesma razão.
+De pessoa física o identificador é `sha256(tipo | nome | CPF mascarado)`, e as
+duas entradas vêm do arquivo `Socios` da Receita, que é aberto: quem tem a fonte
+computa o hash de cada pessoa e monta o mapa inverso.
+
+A construção precisa dele para ligar aresta a nó, e essa necessidade não
+atravessa a fronteira do que se entrega. Ver `_identificador_publicavel`.
+"""
+
 TIPO_DE_EMPRESA: Final = TIPOS["1"]
 
 POSICAO_DA_REGIAO: Final = 9
@@ -223,6 +235,33 @@ def _nome_publicavel(expor_pf: bool) -> str:
         return "nome"
     pessoas = ", ".join(f"'{tipo}'" for tipo in TIPOS_DE_PESSOA_FISICA)
     return f"CASE WHEN tipo IN ({pessoas}) THEN NULL ELSE nome END"
+
+
+def _identificador_publicavel(expor_pf: bool) -> str:
+    """Expressão do identificador do nó, conforme o artefato vá ser publicado.
+
+    **O identificador de pessoa física é reversível com dado público.** Ele é
+    `sha256(tipo | nome normalizado | CPF mascarado)`, e as duas entradas vêm do
+    arquivo `Socios` da Receita, que é aberto. Quem tem a fonte — todo mundo —
+    computa o hash de cada pessoa e monta o mapa inverso. Não é quebra de hash: é
+    enumeração de um domínio público e pequeno.
+
+    Isso reprova no mesmo teste que derrubou a máscara de CPF: **chave de junção
+    de volta à fonte não é pseudônimo**. E não há saída por sal — sal publicado o
+    atacante tem, e sal secreto quebraria a reprodutibilidade do artefato, que é
+    premissa do projeto.
+
+    De pessoa jurídica ele permanece: deriva do `cnpj_basico`, que é o
+    identificador público da empresa, e não revela nada que o CNPJ já não revele.
+
+    O identificador completo continua existindo em `identificadores.parquet`, que
+    é **local e nunca publicado** — mesmo tratamento do bronze. A construção
+    precisa dele para ligar aresta a nó; quem recebe o artefato, não.
+    """
+    if expor_pf:
+        return "identificador"
+    pessoas = ", ".join(f"'{tipo}'" for tipo in TIPOS_DE_PESSOA_FISICA)
+    return f"CASE WHEN tipo IN ({pessoas}) THEN NULL ELSE identificador END"
 
 
 def _mascara_publicavel(expor_pf: bool) -> str:
@@ -303,6 +342,14 @@ class Nos:
     """O que a geração produziu."""
 
     caminho: Path
+
+    caminho_dos_identificadores: Path
+    """O arquivo interno com o identificador de cada nó, na mesma ordem.
+
+    **Nunca publicado**, como o bronze. De pessoa física o identificador é
+    reversível com a fonte aberta da Receita, e por isso ele sai do artefato
+    publicável — mas a construção precisa dele para ligar aresta a nó."""
+
     caminho_da_existencia: Path
 
     nos: int
@@ -605,6 +652,46 @@ def validar_indice_denso(conexao: duckdb.DuckDBPyConnection, caminho: Path) -> N
         )
 
 
+def validar_mesma_ordem(
+    conexao: duckdb.DuckDBPyConnection, nos: Path, identificadores: Path
+) -> None:
+    """Recusa os dois arquivos de nós se a linha `k` não for o mesmo nó nos dois.
+
+    A conferência é **posicional de verdade**, por `file_row_number`, e não por
+    argumento sobre a construção. Uma versão anterior desta guarda só comparava
+    contagem, apoiada no raciocínio de que os dois arquivos saem da mesma tabela
+    com o mesmo `ORDER BY` — e o raciocínio estava certo e a implementação não.
+
+    O `ORDER BY identificador` do arquivo publicável resolvia para o **alias de
+    saída**, que é a expressão já anulada para pessoa física, e ordenava por ela.
+    Os dois arquivos saíam com contagem idêntica, ambos válidos, cada um numa
+    ordem — e o grafo ligava nós trocados sem nada falhar. Guarda que confere
+    contagem não vê isso; só a posição vê.
+    """
+    medida = conexao.execute(
+        f"""
+        SELECT
+          (SELECT count(*) FROM read_parquet('{nos.as_posix()}')),
+          (SELECT count(*) FROM read_parquet('{identificadores.as_posix()}')),
+          (SELECT count(*) FROM
+             read_parquet('{nos.as_posix()}', file_row_number = true) n
+             JOIN read_parquet('{identificadores.as_posix()}', file_row_number = true) i
+               USING (file_row_number)
+           WHERE n.identificador IS NOT NULL AND n.identificador <> i.identificador)
+        """
+    ).fetchone()
+    publicaveis, internos, divergentes = (
+        tuple(int(valor) for valor in medida) if medida else (0, 1, 1)
+    )
+    if publicaveis != internos or divergentes:
+        raise IndiceNaoDensoError(
+            f"Os dois arquivos de nós precisam descrever o mesmo nó na mesma posição: "
+            f"{publicaveis:,} linhas publicáveis contra {internos:,} internas, e "
+            f"{divergentes:,} posições em que o identificador que sobrou não bate. Fora de "
+            "sincronia, o índice de um não endereça o outro e o grafo liga nós trocados."
+        )
+
+
 def validar_existencia_ordenada(existencia: np.ndarray[Any, np.dtype[np.int32]]) -> None:
     """Recusa array de existência fora de ordem estritamente crescente.
 
@@ -659,6 +746,7 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
     destino = config.data_dir / "grafo" / alvo
     destino.mkdir(parents=True, exist_ok=True)
     nos_parquet = destino / "nos.parquet"
+    identificadores_parquet = destino / ARQUIVO_DOS_IDENTIFICADORES
     existencia_npy = destino / "existencia.npy"
 
     with abrir_conexao(config, config.data_dir / "duckdb-tmp") as conexao:
@@ -704,41 +792,72 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
         # duas junções: os dois lados são exatamente as empresas do recorte com
         # aresta e as identidades de sócio, que por construção só existem se houver
         # vínculo. Uma passagem em vez de três, e o dobro de memória economizado.
+        # O universo é materializado **uma vez**, e os dois arquivos saem dele com
+        # o mesmo `ORDER BY` sobre a mesma chave única. É o que faz a linha `k` ser
+        # o mesmo nó nos dois sem depender de conferência posterior: uma ordenação
+        # total sobre chave única não tem duas respostas.
+        conexao.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE universo AS
+            SELECT
+              coalesce(e.identificador, i.identificador) AS identificador,
+              coalesce(i.tipo, '{TIPO_DE_EMPRESA}') AS tipo,
+              coalesce(e.nome, i.nome) AS nome,
+              coalesce(e.cnpj_basico, i.cnpj_basico) AS cnpj_basico,
+              i.cpf_mascarado,
+              i.pais,
+              CASE WHEN coalesce(i.tipo, '{TIPO_DE_EMPRESA}') = '{TIPO_DE_EMPRESA}'
+                   THEN e.identificador IS NOT NULL OR coalesce(i.no_recorte, FALSE) END
+                AS no_recorte,
+              coalesce(i.confianca, 'exata') AS confianca,
+              i.taxa_de_colisao
+            FROM empresa_no e
+            FULL OUTER JOIN read_parquet('{identidades.as_posix()}') i
+              ON e.identificador = i.identificador
+            """
+        )
+
+        # O identificador completo vai para um arquivo à parte: **local, nunca
+        # publicado**, como o bronze. A construção precisa dele para ligar aresta a
+        # nó, e quem recebe o artefato não — de pessoa física ele é reversível com
+        # a fonte aberta da Receita.
+        parcial_dos_identificadores = identificadores_parquet.with_name(
+            f"{identificadores_parquet.name}.parcial"
+        )
+        conexao.execute(
+            f"""
+            COPY (SELECT identificador FROM universo ORDER BY identificador)
+            TO '{parcial_dos_identificadores.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+        )
+
         parcial = nos_parquet.with_name(f"{nos_parquet.name}.parcial")
         conexao.execute(
             f"""
             COPY (
-              SELECT identificador, tipo, {_nome_publicavel(config.expor_pf)} AS nome,
+              SELECT {_identificador_publicavel(config.expor_pf)} AS identificador,
+                     tipo, {_nome_publicavel(config.expor_pf)} AS nome,
                      cnpj_basico,
                      {_mascara_publicavel(config.expor_pf)} AS cpf_mascarado,
                      substr(cpf_mascarado, {POSICAO_DA_REGIAO}, 1) AS regiao_fiscal,
                      pais, no_recorte, confianca, taxa_de_colisao
-              FROM (
-                SELECT
-                  coalesce(e.identificador, i.identificador) AS identificador,
-                  coalesce(i.tipo, '{TIPO_DE_EMPRESA}') AS tipo,
-                  coalesce(e.nome, i.nome) AS nome,
-                  coalesce(e.cnpj_basico, i.cnpj_basico) AS cnpj_basico,
-                  i.cpf_mascarado,
-                  i.pais,
-                  CASE WHEN coalesce(i.tipo, '{TIPO_DE_EMPRESA}') = '{TIPO_DE_EMPRESA}'
-                       THEN e.identificador IS NOT NULL OR coalesce(i.no_recorte, FALSE) END
-                    AS no_recorte,
-                  coalesce(i.confianca, 'exata') AS confianca,
-                  i.taxa_de_colisao
-                FROM empresa_no e
-                FULL OUTER JOIN read_parquet('{identidades.as_posix()}') i
-                  ON e.identificador = i.identificador
-              )
-              ORDER BY identificador
+              FROM universo
+              -- Qualificado de propósito. `ORDER BY identificador` resolveria para
+              -- o **alias de saída**, que é a expressão já anulada, e ordenaria por
+              -- ela: as pessoas físicas iriam todas para o mesmo lugar e os dois
+              -- arquivos sairiam com ordens diferentes. Contagem igual, arquivos
+              -- válidos, grafo ligando nós trocados.
+              ORDER BY universo.identificador
             ) TO '{parcial.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """
         )
 
         try:
-            validar_indice_denso(conexao, parcial)
+            validar_indice_denso(conexao, parcial_dos_identificadores)
+            validar_mesma_ordem(conexao, parcial, parcial_dos_identificadores)
         except ErroDeGrafo:
             parcial.unlink(missing_ok=True)
+            parcial_dos_identificadores.unlink(missing_ok=True)
             raise
         medida = conexao.execute(
             f"SELECT count(*) FROM read_parquet('{parcial.as_posix()}')"
@@ -776,11 +895,13 @@ def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
         raise
 
     parcial.replace(nos_parquet)
+    parcial_dos_identificadores.replace(identificadores_parquet)
     np.save(existencia_npy, existencia, allow_pickle=False)
 
     isolados = int(existencia.size) - empresas_com_aresta
     resultado = Nos(
         caminho=nos_parquet,
+        caminho_dos_identificadores=identificadores_parquet,
         caminho_da_existencia=existencia_npy,
         nos=quantos,
         por_tipo=por_tipo,
@@ -835,11 +956,12 @@ def gerar_arestas(config: Config, competencia: str | None = None) -> Arestas:
             "e não do bronze."
         )
 
-    nos_parquet = config.data_dir / "grafo" / alvo / "nos.parquet"
+    nos_parquet = config.data_dir / "grafo" / alvo / ARQUIVO_DOS_IDENTIFICADORES
     if not nos_parquet.exists():
         raise NosAusentesError(
-            f"Não há nós em {nos_parquet}. O índice de uma aresta é a posição da linha nesse "
-            "arquivo, então ele precisa existir antes — e ser o mesmo que vai ser publicado."
+            f"Não há identificadores de nó em {nos_parquet}. O índice de uma aresta é a "
+            "posição da linha nesse arquivo, que é o par interno de nos.parquet — o publicável "
+            "não serve, porque o identificador de pessoa física foi removido dele."
         )
     destino = nos_parquet.with_name("arestas.parquet")
 
