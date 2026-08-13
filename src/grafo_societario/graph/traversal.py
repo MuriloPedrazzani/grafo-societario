@@ -69,6 +69,55 @@ os nós de encontro, e não do primeiro que apareceu: nós do mesmo nível deste
 podem estar a profundidades diferentes do outro, e o primeiro da lista não é
 necessariamente o mais curto. É o erro clássico da busca bidirecional, e ele
 produz caminho válido — só não mínimo.
+
+## A vizinhança tem dois regimes, e o teto existe para o segundo
+
+Quantos nós há a até `k` saltos depende inteiramente de onde se parte. Medido
+sobre 300 nós aleatórios do maior componente e sobre os 15 de maior grau:
+
+| k | aleatório (mediana) | aleatório (p95) | maior grau (mediana) |
+|---:|---:|---:|---:|
+| 1 | 3 | 8 | **1.132** |
+| 2 | 8 | 130 | **2.249** |
+| 3 | 18 | 317 | **32.304** |
+| 4 | 39 | 1.327 | **57.396** |
+| 5 | 73 | 3.697 | **92.004** |
+
+Três ordens de grandeza de diferença. De um nó comum a bola cresce devagar, porque
+o grau médio é 2,79; de um hub ela estoura no primeiro salto, e um único deles a
+até 5 saltos alcança 7% do componente inteiro.
+
+Por isso `teto_de_nos` **não tem padrão**, pelo mesmo motivo de
+`profundidade_maxima`: um número generoso para um regime é absurdo para o outro. E
+há um segundo motivo — quem consome decide. Uma resposta de API aguenta milhares
+de nós; um desenho legível na tela aguenta centenas. Fixar aqui embutiria a
+necessidade de um consumidor no caminho do outro.
+
+## O corte é por nível inteiro, e o que sobrou é dito
+
+Devolver metade de um nível entrega subgrafo que **parece completo e não é**: o
+consumidor vê alguns vizinhos de três saltos sem saber quais faltaram, e nada na
+resposta o avisa. É a mesma falha que `ALEM_DO_LIMITE` evita no caminho, num lugar
+mais discreto.
+
+Então ou o nível cabe inteiro, ou não entra — e o resultado carrega quantos nós o
+nível recusado teria. Esse número é informação por si só: diz o tamanho do que não
+está sendo visto.
+
+## O que volta é o subgrafo induzido, não a árvore de busca
+
+A busca em largura produz naturalmente uma árvore, e **árvore esconde ciclo**. Mas
+o ciclo é o achado: duas empresas que compartilham um segundo sócio aparecem
+ligadas no subgrafo induzido e desconectadas na árvore.
+
+Toda aresta entre nós devolvidos entra, inclusive as do mesmo nível. É a diferença
+entre "quem está perto" e "como eles se ligam", e é a segunda que interessa a quem
+investiga.
+
+Os nós da borda mostram menos vizinhos do que têm — é inerente a qualquer recorte
+por distância. Por isso cada nó vem com o seu **grau real no grafo inteiro**, que
+sai de `indptr` e não custa byte nenhum de artefato: sem ele, contar as arestas
+desenhadas daria um grau que parece verdadeiro e não é.
 """
 
 from __future__ import annotations
@@ -105,6 +154,10 @@ class ErroDeTravessia(RuntimeError):
 
 class ArtefatosDiscordantesError(ErroDeTravessia):
     """Os componentes dizem que há caminho e a topologia diz que não."""
+
+
+class PedidoInvalidoError(ErroDeTravessia):
+    """Saltos negativos, ou teto que não comporta nem o nó de partida."""
 
 
 @dataclass(frozen=True)
@@ -259,3 +312,129 @@ def buscar_caminho(
     if invertido and caminho.nos:
         caminho = replace(caminho, nos=tuple(reversed(caminho.nos)))
     return caminho
+
+
+@dataclass(frozen=True)
+class Vizinhanca:
+    """O subgrafo induzido a até `saltos` do nó de partida."""
+
+    origem: int
+
+    nos: tuple[int, ...]
+    """Índices densos, em ordem crescente. Inclui a origem, na posição do seu índice."""
+
+    profundidades: tuple[int, ...]
+    """Distância de cada nó até a origem, paralelo a `nos`."""
+
+    graus: tuple[int, ...]
+    """Grau de cada nó **no grafo inteiro**, paralelo a `nos`.
+
+    Não é o grau dentro deste subgrafo. Nó da borda tem vizinhos que ficaram de
+    fora do recorte, e contar as arestas devolvidas daria um número que parece o
+    grau e não é. Sai de `indptr` e não custa byte de artefato."""
+
+    arestas: tuple[tuple[int, int], ...]
+    """Toda aresta entre nós devolvidos, cada uma uma vez, com o menor índice à
+    esquerda e em ordem crescente. **Induzidas, não a árvore de busca**: as do
+    mesmo nível entram, e são elas que revelam ciclo."""
+
+    saltos: int
+    """Profundidade do nível mais fundo presente."""
+
+    saltos_pedidos: int
+
+    nivel_recusado: int
+    """Quantos nós teria o primeiro nível que não coube. Zero quando nada foi
+    recusado — inclusive quando a busca parou por ter esgotado o componente."""
+
+    @property
+    def truncada(self) -> bool:
+        """Se algum nível foi recusado por teto.
+
+        **Não é `saltos < saltos_pedidos`.** Um componente pequeno se esgota antes
+        do `k` pedido e a resposta continua completa: tudo o que existe até lá está
+        ali. Confundir os dois faria uma resposta inteira ser anunciada como
+        parcial."""
+        return self.nivel_recusado > 0
+
+
+def vizinhanca(grafo: Grafo, origem: int, saltos: int, teto_de_nos: int) -> Vizinhanca:
+    """Os nós a até `saltos` da origem, e todas as arestas entre eles.
+
+    `teto_de_nos` é obrigatório: a bola cresce de 3 nós a 1.132 no primeiro salto
+    conforme o ponto de partida, e não há número que sirva aos dois regimes. Ver a
+    tabela medida no topo do módulo.
+
+    O corte é por **nível inteiro**. Se o próximo nível não couber, ele não entra e
+    `nivel_recusado` diz de que tamanho ele era — devolver parte dele entregaria um
+    subgrafo que parece completo sem ser.
+    """
+    grafo.grau(origem)
+    if saltos < 0:
+        raise PedidoInvalidoError(f"Saltos não pode ser negativo: veio {saltos}.")
+    if teto_de_nos < 1:
+        raise PedidoInvalidoError(
+            f"O teto precisa comportar ao menos o nó de partida: veio {teto_de_nos}."
+        )
+
+    profundidade = {origem: 0}
+    fronteira = [origem]
+    nivel_recusado = 0
+    alcancado = 0
+
+    for nivel in range(1, saltos + 1):
+        # O nível é montado inteiro **antes** de ser aceito: marcar durante a
+        # coleta obrigaria a desfazer a marcação se ele não coubesse, e desfazer
+        # pela metade é como se devolve nível parcial sem perceber.
+        proximo: list[int] = []
+        no_nivel: set[int] = set()
+        for no in fronteira:
+            for vizinho in grafo.vizinhos(no).tolist():
+                if vizinho not in profundidade and vizinho not in no_nivel:
+                    no_nivel.add(vizinho)
+                    proximo.append(vizinho)
+        if not proximo:
+            break
+        if len(profundidade) + len(proximo) > teto_de_nos:
+            nivel_recusado = len(proximo)
+            break
+        for no in proximo:
+            profundidade[no] = nivel
+        proximo.sort()
+        fronteira = proximo
+        alcancado = nivel
+
+    nos = sorted(profundidade)
+    conjunto = set(nos)
+    # Já sai ordenado: `nos` é crescente e a linha do CSR também, o que dispensa
+    # ordenar depois. É o mesmo invariante que o commit 23 afirmou.
+    arestas = tuple(
+        (no, vizinho)
+        for no in nos
+        for vizinho in grafo.vizinhos(no).tolist()
+        if vizinho > no and vizinho in conjunto
+    )
+
+    resultado = Vizinhanca(
+        origem=origem,
+        nos=tuple(nos),
+        profundidades=tuple(profundidade[no] for no in nos),
+        graus=tuple(grafo.grau(no) for no in nos),
+        arestas=arestas,
+        saltos=alcancado,
+        saltos_pedidos=saltos,
+        nivel_recusado=nivel_recusado,
+    )
+    logger.info(
+        "vizinhança calculada",
+        extra={
+            "origem": origem,
+            "saltos_pedidos": saltos,
+            "saltos": alcancado,
+            "nos": len(nos),
+            "arestas": len(arestas),
+            "truncada": resultado.truncada,
+            "nivel_recusado": nivel_recusado,
+        },
+    )
+    return resultado

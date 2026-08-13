@@ -26,7 +26,9 @@ from grafo_societario.graph.traversal import (
     ArtefatosDiscordantesError,
     Caminho,
     Desfecho,
+    PedidoInvalidoError,
     buscar_caminho,
+    vizinhanca,
 )
 
 SEM_LIMITE = 10_000
@@ -365,3 +367,191 @@ def test_o_caminho_de_resposta_nao_carrega_o_motor_nem_o_scipy() -> None:
     assert saida.stdout.strip() == "False False", (
         f"traversal.py arrastou motor de ETL ou biblioteca científica: {saida.stdout.strip()}"
     )
+
+
+# ------------------------------------------------- vizinhança de k saltos
+
+
+TRIANGULO_COM_CAUDA = [(0, 1), (0, 2), (1, 2), (2, 3), (3, 4)]
+"""0-1-2 formam um ciclo; 2-3-4 é uma cauda.
+
+A aresta 1-2 liga dois nós do **mesmo nível** a partir de 0. Ela existe no
+subgrafo induzido e não existiria na árvore de busca — é o caso que distingue os
+dois, e o ciclo é o achado que a árvore esconderia.
+"""
+
+
+@pytest.fixture
+def triangulo(tmp_path: Path) -> tuple[Grafo, Any]:
+    return abrir(montar_csr(tmp_path, nos=6, arestas=TRIANGULO_COM_CAUDA))
+
+
+def test_um_salto_traz_o_no_e_os_vizinhos(triangulo: tuple[Grafo, Any]) -> None:
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=1, teto_de_nos=100)
+
+    assert bola.nos == (0, 1, 2)
+    assert bola.profundidades == (0, 1, 1)
+    assert bola.saltos == 1
+
+
+def test_zero_salto_traz_so_a_origem(triangulo: tuple[Grafo, Any]) -> None:
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=0, teto_de_nos=100)
+
+    assert bola.nos == (0,)
+    assert bola.arestas == ()
+    assert not bola.truncada
+
+
+def test_o_subgrafo_e_induzido_e_nao_a_arvore(triangulo: tuple[Grafo, Any]) -> None:
+    """A aresta entre dois nós do mesmo nível entra.
+
+    Árvore de busca sobre 3 nós teria 2 arestas. O induzido tem 3, e a terceira é
+    o ciclo — que é justamente o que interessa a quem investiga: duas empresas
+    ligadas por um segundo sócio em comum.
+    """
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=1, teto_de_nos=100)
+
+    assert bola.arestas == ((0, 1), (0, 2), (1, 2))
+    assert len(bola.arestas) > len(bola.nos) - 1, "árvore teria n-1 arestas"
+
+
+def test_o_grau_e_o_do_grafo_inteiro_e_nao_o_do_recorte(triangulo: tuple[Grafo, Any]) -> None:
+    """O nó 2 tem grau 3 no grafo e só 2 arestas dentro da bola de 1 salto.
+
+    Contar as arestas desenhadas daria um número que parece o grau e não é — e a
+    borda de qualquer recorte por distância tem esse problema.
+    """
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=1, teto_de_nos=100)
+
+    graus = dict(zip(bola.nos, bola.graus, strict=True))
+    assert graus[2] == 3
+    dentro = sum(1 for a, b in bola.arestas if 2 in (a, b))
+    assert dentro == 2, "a fixture precisa ter nó de borda com vizinho fora"
+
+
+# ----------------------------------------- o corte é por nível inteiro
+
+
+def test_nivel_que_nao_cabe_nao_entra_pela_metade(triangulo: tuple[Grafo, Any]) -> None:
+    """Com teto 2, o nível 1 tem 2 nós e não cabe junto da origem.
+
+    Nenhum deles entra: meio nível entregue seria subgrafo que parece completo.
+    """
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=1, teto_de_nos=2)
+
+    assert bola.nos == (0,)
+    assert bola.saltos == 0
+    assert bola.truncada
+    assert bola.nivel_recusado == 2, "diz o tamanho do que não está sendo visto"
+
+
+def test_o_nivel_seguinte_e_recusado_inteiro(triangulo: tuple[Grafo, Any]) -> None:
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=2, teto_de_nos=3)
+
+    assert bola.nos == (0, 1, 2)
+    assert bola.saltos == 1
+    assert bola.truncada
+    assert bola.nivel_recusado == 1
+    assert 3 not in bola.nos, "nenhum nó do nível recusado aparece"
+
+
+def test_teto_folgado_nao_trunca(triangulo: tuple[Grafo, Any]) -> None:
+    """Controle positivo do corte: com espaço, tudo entra."""
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=2, teto_de_nos=100)
+
+    assert bola.nos == (0, 1, 2, 3)
+    assert not bola.truncada
+    assert bola.nivel_recusado == 0
+
+
+def test_componente_esgotado_nao_e_truncamento(triangulo: tuple[Grafo, Any]) -> None:
+    """A distinção que faria uma resposta inteira ser anunciada como parcial.
+
+    Pedindo 10 saltos num componente de 5 nós, a resposta é completa: tudo o que
+    existe até lá está ali. `saltos < saltos_pedidos` e `truncada` é falso.
+    """
+    grafo, _ = triangulo
+
+    bola = vizinhanca(grafo, 0, saltos=10, teto_de_nos=100)
+
+    assert bola.nos == (0, 1, 2, 3, 4)
+    assert bola.saltos == 3
+    assert bola.saltos_pedidos == 10
+    assert not bola.truncada
+    assert bola.nivel_recusado == 0
+
+
+# --------------------------------------------- conferência e guardas
+
+
+@pytest.mark.parametrize("semente", range(8))
+def test_a_bola_confere_com_o_scipy(tmp_path: Path, semente: int) -> None:
+    """O conjunto de nós é exatamente quem está a até k saltos, pelo scipy."""
+    nos = 40
+    grafo, _ = abrir(montar_csr(tmp_path, nos=nos, arestas=grafo_aleatorio(semente, nos, 55)))
+
+    for origem in range(0, nos, 9):
+        distancias = distancias_do_scipy(grafo, origem)
+        for k in (1, 2, 3):
+            bola = vizinhanca(grafo, origem, saltos=k, teto_de_nos=10_000)
+            esperado = tuple(sorted(int(n) for n in np.flatnonzero(distancias <= k)))
+
+            assert bola.nos == esperado
+            assert dict(zip(bola.nos, bola.profundidades, strict=True)) == {
+                int(n): int(distancias[n]) for n in esperado
+            }
+
+
+@pytest.mark.parametrize("semente", range(8))
+def test_toda_aresta_induzida_existe_e_nenhuma_falta(tmp_path: Path, semente: int) -> None:
+    """As duas metades da palavra "induzido": nada a mais, nada a menos."""
+    nos = 40
+    grafo, _ = abrir(montar_csr(tmp_path, nos=nos, arestas=grafo_aleatorio(semente, nos, 55)))
+
+    bola = vizinhanca(grafo, 0, saltos=3, teto_de_nos=10_000)
+    dentro = set(bola.nos)
+
+    for a, b in bola.arestas:
+        assert grafo.sao_vizinhos(a, b), "aresta que não existe no grafo"
+    esperadas = {
+        (a, int(b)) for a in bola.nos for b in grafo.vizinhos(a).tolist() if b > a and b in dentro
+    }
+    assert set(bola.arestas) == esperadas
+    assert list(bola.arestas) == sorted(bola.arestas), "ordem total, para determinismo"
+
+
+def test_a_vizinhanca_e_estavel_entre_chamadas(triangulo: tuple[Grafo, Any]) -> None:
+    grafo, _ = triangulo
+
+    resultados = {vizinhanca(grafo, 0, 2, 100) for _ in range(10)}
+
+    assert len(resultados) == 1
+
+
+@pytest.mark.parametrize(("saltos", "teto"), [(-1, 10), (2, 0), (2, -5)])
+def test_pedido_invalido_e_recusado(triangulo: tuple[Grafo, Any], saltos: int, teto: int) -> None:
+    grafo, _ = triangulo
+
+    with pytest.raises(PedidoInvalidoError):
+        vizinhanca(grafo, 0, saltos, teto)
+
+
+def test_no_fora_da_faixa_na_vizinhanca(triangulo: tuple[Grafo, Any]) -> None:
+    grafo, _ = triangulo
+
+    with pytest.raises(NoForaDaFaixaError):
+        vizinhanca(grafo, 99, 1, 100)
