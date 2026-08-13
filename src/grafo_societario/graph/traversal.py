@@ -66,6 +66,21 @@ invertido quando o pedido veio ao contrário. Assim `caminho(A, B)` é o reverso
 exato de `caminho(B, A)` por construção, e não por coincidência: sem isso, quem
 consultasse os dois sentidos veria caminhos diferentes e leria como defeito.
 
+### O desempate de lado degenera onde degenerar não custa
+
+Numa região em cadeia as duas fronteiras têm tamanho 1 o tempo todo, o desempate
+manda sempre para a origem, e a busca vira unidirecional. Parece perda e não é.
+
+Em cadeia pura, unidirecional visita `L` nós e bidirecional visita `L/2 + L/2`, que
+é o mesmo `L`. O ganho da bidirecional é trocar `b^L` por `2·b^(L/2)`, e ele só
+existe onde há **ramificação** — e onde há ramificação as fronteiras crescem em
+ritmos diferentes, ficam de tamanhos diferentes, e o desempate nem é consultado.
+
+**O caso em que a regra degenera é o caso em que alternar não compraria nada.**
+Alternar por paridade seria igualmente determinístico e igualmente rápido, e
+trocar a regra depois de os commits 27 a 29 terem sido medidos com ela invalidaria
+as medições por ganho esperado zero.
+
 ## Parar no primeiro encontro devolve caminho que não é mínimo
 
 A fronteira é expandida **por nível inteiro**, e a interseção é examinada depois
