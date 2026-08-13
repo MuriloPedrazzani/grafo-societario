@@ -8,16 +8,18 @@ realmente falha.
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 from xml.sax.saxutils import escape
 
 import pytest
+from hypothesis import settings
 
 from grafo_societario.config import Config
 
@@ -212,3 +214,47 @@ def config_de_teste(servidor: tuple[str, EstadoDoServidor], tmp_path: Path) -> C
         rfb_url_base=url,
         rfb_token_compartilhamento="token-de-teste",
     )
+
+
+# ------------------------------------------------- Hypothesis, e o que ele pode sortear
+
+PERFIL_PADRAO: Final = "reprodutivel"
+"""Perfil usado quando `HYPOTHESIS_PROFILE` não diz outra coisa.
+
+**Teste que falha sem poder ser reproduzido é pior que teste ausente.** O padrão
+do Hypothesis é sortear a cada execução e guardar um banco de exemplos entre elas,
+o que produz vermelho no CI que não acontece na máquina de quem vai investigar.
+
+As duas decisões que evitam isso, e o motivo de cada uma:
+
+- **`derandomize=True`.** A geração passa a ser função determinística do teste, e
+  não do relógio. Um vermelho no CI reproduz rodando o mesmo comando localmente,
+  sem precisar do banco nem da semente que o runner sorteou.
+- **`database=None`.** Sem banco, não há estado carregado entre execuções, e
+  também não há por que versioná-lo: com a geração já determinística, o banco não
+  acrescenta reprodutibilidade — só acrescenta um arquivo que muda sozinho.
+
+O custo está declarado: derandomize troca exploração ao longo do tempo por
+repetição fiel. Quem quiser procurar caso novo roda com
+`HYPOTHESIS_PROFILE=exploratorio`, que sorteia e mantém banco local.
+"""
+
+settings.register_profile(
+    PERFIL_PADRAO,
+    derandomize=True,
+    database=None,
+    # Sem prazo por exemplo, e isto é decisão e não descuido. Prazo de relógio é
+    # asserção dependente de plataforma: o mesmo caso passa na máquina rápida e
+    # reprova no runner compartilhado, exatamente como o limiar de readahead que
+    # reprovou no CI da Fase 4. O que limita o trabalho aqui é `max_examples` e o
+    # tamanho dos grafos gerados, que são determinísticos.
+    deadline=None,
+    print_blob=True,
+)
+settings.register_profile(
+    "exploratorio",
+    derandomize=False,
+    deadline=None,
+    max_examples=1000,
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", PERFIL_PADRAO))
