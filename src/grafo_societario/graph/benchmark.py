@@ -55,15 +55,26 @@ está medindo. O commit 21 roda em 6 s: são cento e vinte amostras.
 MIB: Final = 1024 * 1024
 
 ARTEFATOS_PUBLICAVEIS: Final = (
-    "nos.parquet",
+    "cnpj_ordenado.npy",
+    "no_por_cnpj.npy",
+    "atributos.npy",
+    "regiao_fiscal.npy",
+    "nome_offsets.npy",
+    "bloco_inicio.npy",
+    "bloco_byte.npy",
+    "nomes.bin",
     "existencia.npy",
     "indptr.npy",
     "indices.npy",
     "qualificacoes.npy",
     "componentes.npy",
 )
-"""O que vai para GitHub Release e para a imagem. `arestas.parquet` não entra:
-ele é insumo do CSR e não é consultado em tempo de resposta."""
+"""O que vai para GitHub Release e para a imagem.
+
+Três arquivos ficam de fora, e a lista é de permissão justamente para que sair
+seja o padrão e entrar seja decisão: `arestas.parquet` é insumo do CSR,
+`identificadores.parquet` carrega a chave reversível de pessoa física, e
+`nos.parquet` foi substituído pelo catálogo — a resposta não lê Parquet."""
 
 TETO_DE_DEPLOY: Final = 500_000_000
 """500 MB, em bytes decimais — a unidade em que o limite de free tier é anunciado."""
