@@ -23,6 +23,7 @@ from scipy.sparse.csgraph import connected_components, dijkstra
 from grafo_societario.config import Config
 from grafo_societario.graph.csr import Grafo, NoForaDaFaixaError, abrir_grafo
 from grafo_societario.graph.traversal import (
+    ORCAMENTO_DE_VISITADOS,
     ArtefatosDiscordantesError,
     Caminho,
     Desfecho,
@@ -33,6 +34,9 @@ from grafo_societario.graph.traversal import (
 
 SEM_LIMITE = 10_000
 """Alto o bastante para nunca cortar nos grafos destes testes."""
+
+PIOR_CASO_MEDIDO = 99_596
+"""Nós visitados pela pior consulta medida no grafo real, em 6.500 amostras."""
 
 
 # --------------------------------------------------------- montagem
@@ -555,3 +559,96 @@ def test_no_fora_da_faixa_na_vizinhanca(triangulo: tuple[Grafo, Any]) -> None:
 
     with pytest.raises(NoForaDaFaixaError):
         vizinhanca(grafo, 99, 1, 100)
+
+
+# --------------------------------- o orçamento de visitados, e os três desfechos
+
+
+def test_orcamento_pequeno_faz_a_busca_desistir(corrente: tuple[Grafo, Any]) -> None:
+    """Guarda que nunca reprovou não provou que sabe reprovar.
+
+    O máximo real medido é de ~100 mil visitados, muito acima de qualquer
+    orçamento que um teste possa gastar — então o disparo é forçado com um
+    orçamento deliberadamente pequeno. Sem isto, o mecanismo estaria no código sem
+    nunca ter sido exercitado.
+    """
+    grafo, componentes = corrente
+
+    caminho = buscar_caminho(grafo, componentes, 0, 4, SEM_LIMITE, orcamento_de_visitados=3)
+
+    assert caminho.desfecho is Desfecho.ORCAMENTO_EXCEDIDO
+    assert caminho.nos == ()
+
+
+def test_orcamento_folgado_encontra_o_mesmo_par(corrente: tuple[Grafo, Any]) -> None:
+    """Controle positivo do outro lado: o par tem caminho, e com espaço ele aparece.
+
+    É o que impede o teste anterior de passar por um motivo errado — um par sem
+    caminho nenhum também devolveria "não encontrado".
+    """
+    grafo, componentes = corrente
+
+    caminho = buscar_caminho(grafo, componentes, 0, 4, SEM_LIMITE, orcamento_de_visitados=10_000)
+
+    assert caminho.encontrado
+    assert caminho.nos == (0, 1, 2, 3, 4)
+
+
+def test_o_orcamento_nao_altera_a_resposta_quando_sobra(corrente: tuple[Grafo, Any]) -> None:
+    """O padrão e um orçamento absurdo devolvem o mesmo caminho."""
+    grafo, componentes = corrente
+
+    padrao = buscar_caminho(grafo, componentes, 0, 4, SEM_LIMITE)
+    absurdo = buscar_caminho(grafo, componentes, 0, 4, SEM_LIMITE, orcamento_de_visitados=10**9)
+
+    assert padrao.nos == absurdo.nos
+    assert padrao.desfecho is absurdo.desfecho is Desfecho.ENCONTRADO
+
+
+def test_orcamento_excedido_nao_e_ausencia_de_caminho(corrente: tuple[Grafo, Any]) -> None:
+    """Os dois "não sei" e o único "não existe", sobre o mesmo grafo.
+
+    O par (0, 4) tem caminho e devolve dois desfechos diferentes conforme o que
+    faltou; o par (0, 5) não tem caminho nenhum. Colapsar os três em "não
+    encontrado" apagaria a diferença entre "desisti", "não olhei tão fundo" e
+    "não existe".
+    """
+    grafo, componentes = corrente
+
+    desfechos = {
+        buscar_caminho(grafo, componentes, 0, 4, SEM_LIMITE, 3).desfecho,
+        buscar_caminho(grafo, componentes, 0, 4, 3).desfecho,
+        buscar_caminho(grafo, componentes, 0, 5, SEM_LIMITE).desfecho,
+        buscar_caminho(grafo, componentes, 0, 4, SEM_LIMITE).desfecho,
+    }
+
+    assert desfechos == {
+        Desfecho.ORCAMENTO_EXCEDIDO,
+        Desfecho.ALEM_DO_LIMITE,
+        Desfecho.COMPONENTES_DIFERENTES,
+        Desfecho.ENCONTRADO,
+    }
+
+
+def test_o_orcamento_e_conferido_antes_do_componente(corrente: tuple[Grafo, Any]) -> None:
+    """Par sem caminho continua saindo pelo rótulo, sem gastar orçamento nenhum.
+
+    A resposta O(1) não pode ser sabotada por um orçamento apertado: ela não
+    percorre nada, então não há o que orçar.
+    """
+    grafo, componentes = corrente
+
+    caminho = buscar_caminho(grafo, componentes, 0, 5, SEM_LIMITE, orcamento_de_visitados=1)
+
+    assert caminho.desfecho is Desfecho.COMPONENTES_DIFERENTES
+    assert caminho.visitados == 0
+
+
+def test_o_padrao_fica_acima_do_pior_caso_medido() -> None:
+    """A pior consulta medida no grafo real tocou 99.596 nós.
+
+    Um padrão abaixo disso faria consultas legítimas — e já observadas — passarem
+    a devolver ORCAMENTO_EXCEDIDO. O teste amarra a constante à medição que a
+    justificou, para que baixá-la exija olhar o número.
+    """
+    assert ORCAMENTO_DE_VISITADOS >= 2 * PIOR_CASO_MEDIDO

@@ -17,15 +17,20 @@ acaso quase sempre cai em componentes distintos.
 Rodar uma busca até esgotar para descobrir que não há caminho é o desperdício mais
 caro que este módulo poderia cometer — e é justamente o caso mais comum.
 
-## "Não existe" e "não achei" são respostas diferentes
+## "Não existe" e "não achei" são respostas diferentes — e há dois "não achei"
 
-`COMPONENTES_DIFERENTES` é definitivo: não há caminho, ponto. `ALEM_DO_LIMITE`
-diz que existe caminho — o componente garante — e que ele é mais longo que a
-profundidade pedida.
+`COMPONENTES_DIFERENTES` é o único definitivo: não há caminho, ponto. Os outros
+dois dizem que o caminho **existe** — o componente garante — e que esta busca não
+o entregou: `ALEM_DO_LIMITE` porque ele é mais longo que a profundidade pedida, e
+`ORCAMENTO_EXCEDIDO` porque a busca gastou o que tinha antes de chegar lá.
 
-Confundir os dois faria o serviço dizer "estas empresas não têm vínculo" quando a
-verdade é "não procurei até lá". Seria afirmação falsa sobre empresa real, e é o
-modo de falha que esta fase existe para não cometer.
+Confundir qualquer par deles faria o serviço dizer "estas empresas não têm
+vínculo" quando a verdade é "não procurei até lá" ou "desisti no meio". Seria
+afirmação falsa sobre empresa real, e é o modo de falha que esta fase existe para
+não cometer.
+
+**Os três precisam chegar distintos até a resposta da API.** Colapsá-los em
+"não encontrado" na borda desfaz aqui dentro tudo o que este módulo separou.
 
 ## A distância típica aqui não é seis
 
@@ -69,6 +74,32 @@ os nós de encontro, e não do primeiro que apareceu: nós do mesmo nível deste
 podem estar a profundidades diferentes do outro, e o primeiro da lista não é
 necessariamente o mais curto. É o erro clássico da busca bidirecional, e ele
 produz caminho válido — só não mínimo.
+
+## A poda por grau foi medida e recusada
+
+O plano pedia poda por grau: recusar expandir por nó de grau alto, para o hub não
+explodir a busca. **A medição derrubou a premissa.** Sobre 6.500 consultas no
+grafo real, partir do maior hub do gigante custa o mesmo que partir de um nó
+qualquer:
+
+| amostra | visitados p99,9 | tempo p99,9 | tempo máximo |
+|---|---:|---:|---:|
+| 5.000 pares aleatórios do gigante | 82.377 | 82,4 ms | **109,2 ms** |
+| 800 pares partindo dos 20 maiores hubs | 97.749 | 105,2 ms | **107,1 ms** |
+
+Indistinguíveis. O hub engorda a fronteira **uma vez** e a busca segue — não há
+explosão exponencial. A intuição de que hubs matam a travessia vem de rede densa;
+esta tem grau médio 2,79. E 63,6% dos caminhos já atravessam um nó de grau acima
+de 100, com a mesma distribuição: passar por hub é o caso normal, não o
+patológico. O que domina o custo é o **comprimento** do caminho, não o grau.
+
+Recusada também por ser errada em princípio: podar por grau **remove aresta que
+existe**. Um caminho legítimo pelo contador de três mil empresas deixaria de ser
+encontrado, e a resposta viria `ALEM_DO_LIMITE` ou com um caminho mais longo —
+afirmação falsa sobre o grafo, entregue com cara de resposta.
+
+O substituto é o **orçamento de visitados**, e a justificativa dele é outra: não é
+o custo observado, é a cobertura da amostra. Ver `ORCAMENTO_DE_VISITADOS`.
 
 ## A vizinhança tem dois regimes, e o teto existe para o segundo
 
@@ -136,9 +167,42 @@ logger = logging.getLogger(__name__)
 SEM_PAI: int = -1
 """Marca a raiz de cada lado. Índice de nó nunca é negativo."""
 
+ORCAMENTO_DE_VISITADOS: int = 250_000
+"""Teto de nós tocados por consulta, antes de a busca desistir.
+
+**A justificativa não é o custo observado — é a cobertura da amostra.** A pior
+consulta medida tocou 99.596 nós em 107 ms, e nenhuma das 6.500 passou de 110 ms.
+Isso não autoriza afirmar que não existe consulta pior: foram 5.000 pares de
+aproximadamente 900 bilhões possíveis dentro do maior componente, cinco bilionésimos do
+espaço. O máximo de uma amostra desse tamanho não diz quase nada sobre o máximo
+real, e a competência muda todo mês.
+
+O orçamento converte "amostrei e pareceu bem" em "limitado por construção", que é
+a diferença que este projeto persegue desde a conversão do bronze.
+
+**O número é absoluto e o que ele significa é relativo.** 250.000 são 2,5 vezes o
+máximo observado e **18,6% do maior componente da competência 2026-06 com
+UF_ALVO=SP, que tem 1.343.694 nós**. Esse denominador é o que muda: com outra UF
+ou outra competência, o mesmo 250.000 pode virar 5% ou 50% do gigante. Quem
+recalibrar precisa da razão, e não só do número — por isso os dois estão escritos
+aqui. Uma fração calculada em tempo de execução foi recusada: acoplaria a busca ao
+tamanho do componente e complicaria sem comprar precisão.
+
+A conferência acontece na **borda do nível**, nunca no meio de um, pelo mesmo
+motivo que a vizinhança trunca por nível inteiro. O orçamento pode ser
+ultrapassado por até um nível, e um caminho encontrado no nível que cruzou o teto
+ainda é devolvido: resposta ganha de limite.
+"""
+
 
 class Desfecho(StrEnum):
-    """Por que a busca terminou. As três respostas não podem virar uma só."""
+    """Por que a busca terminou. Os três não podem virar um só.
+
+    **Um é definitivo e dois são "não sei".** `COMPONENTES_DIFERENTES` afirma
+    ausência de caminho; os outros afirmam apenas que esta busca não o entregou. A
+    resposta da API precisa preservar a distinção — colapsá-la na borda desfaz o
+    cuidado inteiro deste módulo.
+    """
 
     ENCONTRADO = "encontrado"
     COMPONENTES_DIFERENTES = "componentes_diferentes"
@@ -146,6 +210,14 @@ class Desfecho(StrEnum):
 
     ALEM_DO_LIMITE = "alem_do_limite"
     """Existe caminho — o componente garante — e ele é mais longo que o pedido."""
+
+    ORCAMENTO_EXCEDIDO = "orcamento_excedido"
+    """Existe caminho, e a busca gastou o orçamento de visitados antes de achá-lo.
+
+    Não é ausência de caminho e não é limite de profundidade: é a busca admitindo
+    que parou. O bound é em nós tocados, e não em relógio, porque relógio não é
+    determinístico — a mesma consulta responderia diferente conforme a carga da
+    máquina, e aí não há cache nem demonstração estável."""
 
 
 class ErroDeTravessia(RuntimeError):
@@ -232,7 +304,13 @@ def _montar(
     return tuple(esquerda + direita)
 
 
-def _buscar(grafo: Grafo, origem: int, destino: int, profundidade_maxima: int) -> Caminho:
+def _buscar(
+    grafo: Grafo,
+    origem: int,
+    destino: int,
+    profundidade_maxima: int,
+    orcamento_de_visitados: int,
+) -> Caminho:
     """A busca canônica, sempre com `origem < destino`."""
     pai_o: dict[int, int] = {origem: SEM_PAI}
     pai_d: dict[int, int] = {destino: SEM_PAI}
@@ -247,6 +325,13 @@ def _buscar(grafo: Grafo, origem: int, destino: int, profundidade_maxima: int) -
         # ele ultrapassou o limite é trabalho jogado fora.
         if nivel_o + nivel_d + 1 > profundidade_maxima:
             return Caminho((), Desfecho.ALEM_DO_LIMITE, len(prof_o) + len(prof_d))
+
+        # O orçamento é conferido na borda do nível, e depois da checagem de
+        # encontro do nível anterior: caminho já achado é devolvido mesmo que o
+        # nível que o achou tenha cruzado o teto. Resposta ganha de limite.
+        visitados = len(prof_o) + len(prof_d)
+        if visitados > orcamento_de_visitados:
+            return Caminho((), Desfecho.ORCAMENTO_EXCEDIDO, visitados)
 
         # A fronteira menor é a que cresce menos ao ser expandida. O empate vai
         # para a origem, e não para o lado que por acaso estiver na variável.
@@ -284,6 +369,7 @@ def buscar_caminho(
     origem: int,
     destino: int,
     profundidade_maxima: int,
+    orcamento_de_visitados: int = ORCAMENTO_DE_VISITADOS,
 ) -> Caminho:
     """O caminho societário mais curto entre dois nós, ou por que não há um.
 
@@ -295,6 +381,10 @@ def buscar_caminho(
     A busca só acontece quando o rótulo de componente não resolve, e ela é feita
     sobre o par canônico: menor índice como origem, resultado invertido se o
     pedido veio ao contrário.
+
+    `orcamento_de_visitados` tem padrão porque é limite **operacional**, e não
+    escolha de produto como os outros dois: ele existe para nenhuma consulta poder
+    comer o processo, e a medição dá o número. Ver `ORCAMENTO_DE_VISITADOS`.
     """
     grafo.grau(origem)
     grafo.grau(destino)
@@ -308,7 +398,7 @@ def buscar_caminho(
 
     invertido = origem > destino
     menor, maior = (destino, origem) if invertido else (origem, destino)
-    caminho = _buscar(grafo, menor, maior, profundidade_maxima)
+    caminho = _buscar(grafo, menor, maior, profundidade_maxima, orcamento_de_visitados)
     if invertido and caminho.nos:
         caminho = replace(caminho, nos=tuple(reversed(caminho.nos)))
     return caminho
