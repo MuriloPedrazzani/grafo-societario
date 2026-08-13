@@ -236,3 +236,41 @@ def abrir_grafo(config: Config, competencia: str | None = None) -> Grafo:
         },
     )
     return grafo
+
+
+def carregar_componentes(
+    config: Config, competencia: str | None = None, nos: int | None = None
+) -> np.ndarray[Any, np.dtype[np.int32]]:
+    """Mapeia o rótulo de componente de cada nó.
+
+    **Ler componente não precisa de scipy.** O rótulo é calculado uma vez na
+    construção, por `graph.components`, e chega aqui como array: comparar
+    `componentes[a] == componentes[b]` responde "existe caminho possível" em tempo
+    constante, sem percorrer nada e sem carregar biblioteca científica no caminho
+    de resposta.
+
+    A resposta positiva não é caminho — é permissão para procurar um. A negativa,
+    essa é definitiva: componentes diferentes não têm caminho, e a Fase 5 pode
+    devolver isso sem gastar uma travessia.
+
+    `nos` é conferido quando informado, porque um `componentes.npy` de outra
+    execução tem tamanho diferente do conjunto de nós e transformaria índice
+    válido em rótulo de outro nó.
+    """
+    alvo = competencia or config.competencia
+    caminho = config.data_dir / "grafo" / alvo / "componentes.npy"
+    if not caminho.exists():
+        raise ArtefatoAusenteError(
+            f"Não há componentes em {caminho}. Eles são calculados na construção do grafo, e "
+            "não em tempo de resposta."
+        )
+    componentes: np.ndarray[Any, np.dtype[np.int32]] = np.load(
+        caminho, mmap_mode=MODO_DE_MAPEAMENTO
+    )
+    if nos is not None and componentes.size != nos:
+        raise ArtefatosIncompativeisError(
+            f"componentes tem {componentes.size:,} rótulos e o grafo tem {nos:,} nós. Os dois "
+            "vieram de execuções diferentes, e cada índice passaria a devolver o componente de "
+            "outro nó."
+        )
+    return componentes
