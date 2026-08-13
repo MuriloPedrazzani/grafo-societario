@@ -1068,6 +1068,30 @@ def test_laco_sai_do_csr_contado(silver_com_laco_e_paralela: Config) -> None:
         assert no not in vizinhos(indptr, indices, no), "nó não é vizinho de si mesmo"
 
 
+def test_no_com_vinculo_so_de_laco_fica_com_grau_zero(
+    silver_com_laco_e_paralela: Config,
+) -> None:
+    """O invariante exato, porque o óbvio é falso.
+
+    Vale: **todo nó de `nos.parquet` tinha ao menos um vínculo**. Não vale: "todo
+    nó do CSR tem ao menos um vizinho". A empresa `11111111` é sócia de si mesma e
+    de mais ninguém — entrou como nó porque tinha vínculo, e saiu do CSR com grau
+    zero porque o vínculo que tinha não liga a lugar nenhum.
+
+    No recorte real são 30 em 10.658.250. É pouco o bastante para a versão errada
+    do invariante passar em qualquer amostra, e é por isso que ela precisa de um
+    teste em vez de uma frase.
+    """
+    nos = gerar_nos(silver_com_laco_e_paralela)
+    indice = indice_por_identificador(nos.caminho)
+    indptr, indices, _ = construir_csr(silver_com_laco_e_paralela)
+
+    sozinha = indice[no_da_empresa("11111111")]
+    assert int(indptr[sozinha + 1]) - int(indptr[sozinha]) == 0
+    assert vizinhos(indptr, indices, sozinha) == []
+    assert no_da_empresa("11111111") in indice, "e mesmo assim é nó: tinha vínculo"
+
+
 # ------------------------ validação cruzada contra uma implementação independente
 
 

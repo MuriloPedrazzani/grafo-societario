@@ -2,15 +2,31 @@
 
 ## Nem toda empresa do recorte é um nó do grafo
 
-Das 19.770.618 empresas do recorte de SP, **14.791.390 não têm nenhuma aresta** —
+Das 19.770.618 empresas do recorte de SP, **14.791.390 não têm nenhum vínculo** —
 74,8%. São, quase todas, empresário individual: o dono está dentro da razão social
 e o projeto recusa extraí-lo de lá, então nenhum vínculo é registrado. Ver a
 decisão e o custo em `transform.silver`.
 
-Um nó de grau zero não pode estar em caminho societário nenhum. Carregá-lo no CSR
-custa uma entrada de `indptr` e uma linha de metadados por nada, e é o que estoura
-o orçamento de 500 MB do artefato — o gargalo do deploy são os metadados dos nós,
-não os arrays do grafo.
+Um nó sem vínculo nenhum não pode estar em caminho societário nenhum. Carregá-lo
+no CSR custa uma entrada de `indptr` e uma linha de metadados por nada, e é o que
+estoura o orçamento de 500 MB do artefato — o gargalo do deploy são os metadados
+dos nós, não os arrays do grafo.
+
+## O invariante exato, porque o óbvio é falso
+
+**Todo nó de `nos.parquet` tinha ao menos um vínculo em `arestas.parquet`.** Essa é
+a afirmação que vale, e ela não é a mesma que "todo nó do CSR tem ao menos um
+vizinho" — que **é falsa**.
+
+A serialização descarta laço, e 30 nós tinham como único vínculo um laço: uma
+empresa registrada como sócia de si mesma e de mais ninguém. Eles entraram em
+`nos.parquet` porque tinham vínculo, e saíram do CSR com **grau 0** porque o
+vínculo que tinham não liga a lugar nenhum.
+
+Trinta em 10.658.250 é pouco, e é justamente por isso que a versão errada do
+invariante sobreviveria: ela passa em qualquer amostra. Quem escrever guarda,
+travessia ou métrica sobre "todo nó tem vizinho" vai acertar 99,9997% das vezes e
+errar sem sintoma no resto. O número muda a cada competência; o mecanismo, não.
 
 ## Mas "não tem vínculo" e "não existe" são respostas diferentes
 
@@ -20,7 +36,7 @@ resposta certa é que ela não tem vínculo societário registrado.
 
 Daí a separação em dois artefatos:
 
-- **`nos.parquet`** — os 10.658.250 nós com pelo menos uma aresta e os atributos de
+- **`nos.parquet`** — os 10.658.250 nós com pelo menos um vínculo e os atributos de
   cada um, ordenados por identificador. É o dicionário reverso do grafo, e o índice
   de um nó é a posição da linha.
 - **`existencia.npy`** — os 19.770.618 `cnpj_basico` do recorte, como int32
@@ -290,7 +306,11 @@ class Nos:
     caminho_da_existencia: Path
 
     nos: int
-    """Nós com pelo menos uma aresta. São os que entram no CSR."""
+    """Nós com pelo menos um **vínculo**. São os que entram no CSR.
+
+    Ter vínculo não é ter vizinho: 30 destes tinham como único vínculo um laço,
+    que a serialização descarta, e ficam no CSR com grau 0. Ver o invariante no
+    topo do módulo."""
 
     por_tipo: tuple[tuple[str, int], ...]
 
@@ -298,7 +318,7 @@ class Nos:
     """Empresas do recorte cuja existência é respondível — todas, com ou sem vínculo."""
 
     isolados: int
-    """Empresas do recorte sem nenhuma aresta. Ficam fora do grafo e dentro da
+    """Empresas do recorte sem nenhum vínculo. Ficam fora do grafo e dentro da
     existência: consultá-las devolve "sem vínculo", nunca "não existe"."""
 
     bytes_dos_nos: int
@@ -618,7 +638,7 @@ def _caminhos(config: Config, competencia: str) -> tuple[Path, Path, Path]:
 def gerar_nos(config: Config, competencia: str | None = None) -> Nos:
     """Mapeia cada nó para um inteiro denso e grava o dicionário reverso.
 
-    Um nó entra se tiver pelo menos uma aresta, de qualquer um dos dois lados: a
+    Um nó entra se tiver pelo menos um vínculo, de qualquer um dos dois lados: a
     empresa que tem sócio, e o sócio — que pode ser pessoa física, estrangeiro, ou
     outra empresa, dentro ou fora do recorte.
 
