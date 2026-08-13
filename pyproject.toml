@@ -23,17 +23,34 @@ dependencies = [
     "tenacity>=9.0",
     "typer>=0.15",
     "duckdb>=1.1",
+    "numpy>=2.0",
 ]
 
 [project.scripts]
 grafo-societario = "grafo_societario.cli:main"
 
 [project.optional-dependencies]
+# Só o que a construção dos artefatos precisa, e que o serving não carrega.
+# `components.py` usa `scipy.sparse.csgraph` para rotular os componentes; a API
+# lê `componentes.npy` com NumPy e nunca chama o scipy. Manter os dois grupos
+# separados é o que permite a imagem da Fase 8 não embarcar uma biblioteca
+# científica para responder consulta sobre array pré-computado — mesmo motivo
+# pelo qual `graph/csr.py` não importa DuckDB.
+build = ["scipy>=1.14"]
 dev = [
+    "grafo-societario[build]",
     "pytest>=8.0",
     "ruff>=0.9",
     "mypy>=1.14",
     "pre-commit>=4.0",
+    # Os stubs entram junto: o mypy roda em modo strict, e a saída para uma
+    # biblioteca sem tipos é instalar os tipos, não afrouxar a verificação.
+    "scipy-stubs>=1.14",
+    # Medidor de memória residente do processo. O teste do CSR precisa afirmar
+    # que mapear não carrega, e isso é sobre RSS — não sobre o valor devolvido,
+    # que uma implementação que carregasse tudo também acertaria.
+    "psutil>=6.0",
+    "types-psutil>=6.0",
 ]
 
 [project.urls]

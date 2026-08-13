@@ -31,6 +31,7 @@ import duckdb
 from grafo_societario.config import Config
 from grafo_societario.transform.bronze import abrir_conexao
 from grafo_societario.transform.identity import (
+    EXPRESSAO_DO_IDENTIFICADOR,
     consulta_de_socios_identificados,
     instalar_identificador,
 )
@@ -342,7 +343,7 @@ def integridade_referencial(
     sem_identidade = conexao.execute(
         f"""
         SELECT count(*) FROM (
-          SELECT DISTINCT {_IDENTIFICADOR_DE_CONFERENCIA} AS identificador FROM conferencia
+          SELECT DISTINCT {EXPRESSAO_DO_IDENTIFICADOR} AS identificador FROM conferencia
         ) c ANTI JOIN read_parquet('{artefatos["identidades"].as_posix()}') i
         USING (identificador)
         """
@@ -452,16 +453,6 @@ REGRAS: Final[tuple[Regra, ...]] = (
     faixas_plausiveis,
     contagem_minima,
 )
-
-_IDENTIFICADOR_DE_CONFERENCIA: Final = """
-CASE confianca
-  WHEN 'exata' THEN identificador(['pessoa_juridica', substr(cnpj_cpf_socio, 1, 8)])
-  WHEN 'estimada' THEN identificador(['pessoa_fisica', nome, cnpj_cpf_socio])
-  WHEN 'fraca' THEN identificador(['estrangeiro', nome, coalesce(pais, '')])
-  ELSE identificador(['nao_fundivel', cnpj_basico, coalesce(cnpj_cpf_socio, ''),
-                      coalesce(nome, ''), coalesce(pais, '')])
-END
-"""
 
 
 def provar_que_a_varredura_acha(config: Config, competencia: str) -> int:

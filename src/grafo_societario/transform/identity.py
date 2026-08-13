@@ -190,6 +190,24 @@ def instalar_identificador(conexao: duckdb.DuckDBPyConnection) -> None:
     conexao.execute(MACRO_DE_IDENTIFICADOR)
 
 
+def expressao_do_no_de_empresa(cnpj_basico: str) -> str:
+    """O identificador de um nó de pessoa jurídica, dada a coluna do `cnpj_basico`.
+
+    **Uma aresta tem dois extremos, e os dois precisam da mesma chave.** O extremo
+    do sócio sai de `EXPRESSAO_DO_IDENTIFICADOR`; o da empresa sai daqui. Se as
+    duas divergirem, a mesma empresa vira dois nós — um por ser empresa, outro por
+    ser sócia — e o caminho societário que passava por ela deixa de existir. Sem
+    exceção, sem contagem errada: com um grafo que simplesmente não liga o que
+    liga, que é o modo de falha mais caro deste projeto.
+
+    Recebe a expressão da coluna porque o `cnpj_basico` chega de lugares
+    diferentes: coluna própria em `empresas` e em `socios`, e os oito primeiros
+    dígitos de `cnpj_cpf_socio` quando o sócio é pessoa jurídica. O que não varia
+    é a regra, e é ela que mora aqui — o caminho até o valor é de quem chama.
+    """
+    return f"identificador(['{TIPOS['1']}', {cnpj_basico}])"
+
+
 # ------------------------------------------------------------------- artefato
 
 COLUNAS_IDENTIDADES: Final = (
@@ -265,18 +283,40 @@ CASE
 END
 """
 
-_IDENTIFICADOR = f"""
+EXPRESSAO_DO_IDENTIFICADOR: Final = f"""
 CASE confianca
-  WHEN '{EXATA}' THEN identificador(['{TIPOS["1"]}', substr(cnpj_cpf_socio, 1, 8)])
+  WHEN '{EXATA}' THEN {expressao_do_no_de_empresa("substr(cnpj_cpf_socio, 1, 8)")}
   WHEN '{ESTIMADA}' THEN identificador(['{TIPOS["2"]}', nome, cnpj_cpf_socio])
   WHEN '{FRACA}' THEN identificador(['{TIPOS["3"]}', nome, coalesce(pais, '')])
   ELSE identificador(['{NAO_FUNDIVEL}', cnpj_basico, coalesce(cnpj_cpf_socio, ''),
                       coalesce(nome, ''), coalesce(pais, '')])
 END
 """
-"""A chave inclui o tipo, para que um `cnpj_basico` e um nome nunca colidam por
+"""A regra que transforma um vínculo em nó, em SQL, num lugar só.
+
+A chave inclui o tipo, para que um `cnpj_basico` e um nome nunca colidam por
 acaso. A de `nao_fundivel` inclui a empresa: sem nome não há o que fundir, então
-cada vínculo vira um nó, e a empresa é o que os mantém distintos entre si."""
+cada vínculo vira um nó, e a empresa é o que os mantém distintos entre si.
+
+**Pública porque tem mais de um consumidor.** A geração produz o artefato de
+identidades; a verificação de qualidade recomputa e confere contra o que está em
+disco; a construção do grafo liga vínculo a nó pela mesma chave.
+
+O modo de falha que a duplicação causa não é a guarda deixar de acusar — é ela
+acusar a coisa errada. Com uma cópia de cada lado, mudar a regra em um deles faz
+a conferência apontar `vinculo_sem_identidade`, que quer dizer "o artefato foi
+gerado de um sócios antigo". Quem depura vai reprocessar o silver, e o silver
+está certo: o que divergiu foi código. A guarda continua vermelha, e manda
+procurar no lugar errado.
+
+**Eliminar a duplicação vence testar a equivalência dela.** Esta é a segunda vez
+que a mesma regra aparece duas vezes neste projeto, e as duas se resolvem
+diferente com razão. A macro SQL de supressão de CPF contra o `cpf_valido` de
+Python **não pode** ser compartilhada — são motores diferentes — e ali o teste de
+equivalência em doze casos é o melhor disponível. Aqui é o mesmo motor e a mesma
+string: compartilhar é possível, e possível vence. Equivalência é o segundo
+melhor, reservado para duplicação inevitável.
+"""
 
 _TAXA_EM_INTEIROS: Final = """
 A taxa de colisão é somada em inteiros, e não em ponto flutuante.
@@ -307,6 +347,11 @@ def consulta_de_socios_identificados(socios: Path) -> str:
     A Fase 4 usa a mesma consulta para ligar vínculo a nó: o identificador é a
     chave de junção, porque `identidades.nome` guarda a grafia de exibição e não
     a normalizada.
+
+    `qualificacao_socio` vem junto porque é atributo do **vínculo**, não da
+    identidade: a mesma pessoa é administradora de uma empresa e sócia de outra.
+    Por isso ela não está em `identidades.parquet` e precisa sair daqui, da linha
+    que ainda é uma aresta, antes de a agregação por identificador desfazê-la.
     """
     return f"""
     SELECT cnpj_basico,
@@ -314,6 +359,7 @@ def consulta_de_socios_identificados(socios: Path) -> str:
            normalizar_nome(nome_socio_ou_razao_social) AS nome,
            nome_socio_ou_razao_social AS nome_de_origem,
            cnpj_cpf_socio,
+           qualificacao_socio,
            pais,
            {_TIPO} AS tipo,
            {_CONFIANCA} AS confianca
@@ -378,7 +424,7 @@ def gerar_identidades(config: Config, competencia: str | None = None) -> Identid
             f"""
             CREATE OR REPLACE TEMP TABLE identificado AS
             SELECT *,
-                   {_IDENTIFICADOR} AS identificador,
+                   {EXPRESSAO_DO_IDENTIFICADOR} AS identificador,
                    CASE WHEN confianca = '{EXATA}' THEN substr(cnpj_cpf_socio, 1, 8) IN (
                           SELECT cnpj_basico FROM read_parquet('{recorte.as_posix()}')) END
                      AS no_recorte
