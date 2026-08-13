@@ -28,10 +28,42 @@ Estas restrições são deliberadas e moldam toda a arquitetura:
 
 | Restrição | Implicação |
 |---|---|
-| Roda em 8 GB de RAM | Nada de cluster; processamento *out-of-core* com DuckDB — pico medido de 1,83 GiB |
+| Roda em 8 GB de RAM | Nada de cluster; teto de memória **declarado** e transbordo para disco — pico medido de **4,27 GiB**, 53% da restrição |
 | Custo zero (free tier) | Sem banco de grafo gerenciado, sem orquestrador dedicado |
 | Artefato de deploy ≤ 500 MB | Grafo a serializar em arrays CSR lidos via `mmap` (Fase 4) |
 | Recorte por UF da matriz | Parametrizável; o padrão é SP |
+
+## Memória
+
+O teto é **escolhido, não descoberto**. O motor roda com `memory_limit` declarado
+(`LIMITE_DE_MEMORIA`, padrão `4GB`) e diretório de transbordo próprio: quando a
+tabela não cabe, ela vai para disco em vez de a máquina morrer.
+
+A prova é variar o teto e remedir — o pico acompanha o que foi declarado:
+
+| `LIMITE_DE_MEMORIA` | Pico do pipeline | Tempo da Fase 4 |
+|---|---:|---:|
+| `4GB` (padrão) | **4,27 GiB** | 33,3 s |
+| `2GB` | 2,33 GiB | 37,8 s |
+| `1GB` | 1,42 GiB | 47,5 s |
+
+Metade da memória custa 13% de tempo; um quarto custa 43%. Em máquina apertada, é
+uma linha no `.env`.
+
+**O pico está na construção do grafo, não no bronze** — e isso surpreende. O
+bronze faz 1,83 GiB lendo 23,24 GiB de CSV; a Fase 4 faz mais do dobro lendo 650
+MiB de silver, **trinta e sete vezes menos entrada**. O que custa não é o volume:
+é o hash de 8,7 milhões de vínculos e a junção contra 10,6 milhões de nós, que
+precisam de tabela em memória. Ler e escrever linha a linha é barato em qualquer
+tamanho.
+
+Há um piso de cerca de 750 MiB que o teto não controla: o cálculo de componentes
+conexos roda em NumPy e SciPy, não no motor de ETL, e esses não transbordam.
+
+Os números por etapa estão em [`docs/benchmark.md`](docs/benchmark.md), gerado
+pelo próprio código — o pico é amostrado a cada 50 ms enquanto a etapa roda, e não
+lido depois que ela termina, que é o erro que faz uma etapa de 4,3 GiB reportar 86
+MiB.
 
 ## Privacidade
 
@@ -149,9 +181,10 @@ colunas como texto, nada inferido:
 | Sócios | 2,66 GiB | 0,50 GiB | 27.838.448 |
 | **Total** | **23,24 GiB** | **4,91 GiB** | **168.342.044** |
 
-Cerca de **21%** do tamanho original, com pico de memória de **1,83 GiB** — dentro
-da restrição de 8 GiB do projeto, com folga. A contagem de registros é conferida
-antes e depois de cada conversão, e divergência interrompe o processo.
+Cerca de **21%** do tamanho original, com pico de **1,83 GiB nesta etapa** — que
+não é o pico do pipeline. A etapa mais pesada não é esta, e sim a construção do
+grafo; ver [Memória](#memória). A contagem de registros é conferida antes e depois
+de cada conversão, e divergência interrompe o processo.
 
 A camada silver recorta pela UF da matriz, tipa, decodifica e pseudonimiza.
 Com `UF_ALVO=SP` na competência 2026-06:
