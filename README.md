@@ -4,7 +4,7 @@
 
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
-> **Status:** em desenvolvimento — Fase 3 de 9. Este README é atualizado a cada fase concluída.
+> **Status:** em desenvolvimento — Fase 4 de 9. Este README é atualizado a cada fase concluída.
 
 ---
 
@@ -30,7 +30,7 @@ Estas restrições são deliberadas e moldam toda a arquitetura:
 |---|---|
 | Roda em 8 GB de RAM | Nada de cluster; teto de memória **declarado** e transbordo para disco — pico medido de **4,27 GiB**, 53% da restrição |
 | Custo zero (free tier) | Sem banco de grafo gerenciado, sem orquestrador dedicado |
-| Artefato de deploy ≤ 500 MB | Grafo a serializar em arrays CSR lidos via `mmap` (Fase 4) |
+| Artefato de deploy ≤ 500 MB | Grafo em arrays CSR lidos via `mmap` — **443 MB**, 11% de folga |
 | Recorte por UF da matriz | Parametrizável; o padrão é SP |
 
 ## Memória
@@ -140,7 +140,7 @@ Receita Federal (ZIP/CSV)
    [ silver ]    tipagem, recorte por UF, decodificação, identidade       ✔ pronto
         │
         ▼
-   [ grafo ]     arestas → arrays CSR (.npy) + componentes conexos        Fase 4
+   [ grafo ]     arestas → arrays CSR (.npy) + componentes conexos        ✔ pronto
         │
         ▼
    [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap        Fase 6
@@ -150,14 +150,14 @@ As decisões estão registradas hoje nos módulos que as implementam e nas mensa
 
 ## Stack
 
-Em uso: `Python` · `DuckDB` · `Parquet` · `GitHub Actions`
-Previsto: `NumPy/SciPy` (Fase 4) · `FastAPI` (Fase 6) · `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
+Em uso: `Python` · `DuckDB` · `Parquet` · `NumPy/SciPy` · `GitHub Actions`
+Previsto: `FastAPI` (Fase 6) · `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
 
 ---
 
 ## Reprodução
 
-Aquisição, bronze e silver já funcionam ponta a ponta. Grafo e API chegam nas fases seguintes.
+Aquisição, bronze, silver e grafo já funcionam ponta a ponta. A API chega na Fase 6.
 
 ```bash
 pip install -e ".[dev]"
@@ -209,6 +209,56 @@ Cada etapa confere o que produz, e um portão final confere se as quatro tabelas
 concordam **entre si**: a cadeia recorte → empresas → sócios → identidades precisa
 fechar, toda chave de junção precisa existir do outro lado, e nenhuma coluna de
 texto pode conter documento. Regra quebrada interrompe o pipeline; nada é aviso.
+
+A camada do grafo transforma esses vínculos em arrays CSR lidos por `mmap`, mais
+os componentes conexos. Em **33,3 s** sobre a competência 2026-06:
+
+| Artefato | Tamanho | O que é |
+|---|---:|---|
+| `nos.parquet` | 182,8 MiB | 10.658.250 nós com vínculo, e o que cada um é |
+| `existencia.npy` | 75,4 MiB | o recorte inteiro, para responder existência |
+| `indptr.npy` + `indices.npy` | 107,0 MiB | a topologia: 8.689.882 arestas |
+| `qualificacoes.npy` | 16,6 MiB | o papel de cada vínculo, paralelo a `indices` |
+| `componentes.npy` | 40,7 MiB | 2.841.365 componentes conexos |
+| **total** | **443 MB** | 11% abaixo do teto de deploy |
+
+### O grafo não tem um gigante que engole tudo
+
+O maior componente tem **1.343.694 nós — 12,61%** do grafo, e o segundo tem 3.731:
+trezentas e sessenta vezes menor. A mediana de tamanho é **3**, o agrupamento
+típico sendo uma empresa e dois sócios.
+
+Isso decide o desenho da busca. Para um par tirado ao acaso, a resposta "não há
+caminho" sai de comparar dois inteiros, sem percorrer nada — 87% dos nós estão
+fora do gigante. E quando os dois estão dentro dele, o espaço a percorrer é 1,34
+milhão de nós com **grau médio 2,79**, não 10,6 milhões.
+
+O nó de maior grau do recorte — 3.728 vizinhos — **não está no gigante**: ele é o
+centro de uma estrela quase pura que forma sozinha o segundo componente. Dentro do
+gigante, o maior grau é 3.154.
+
+### O que a construção precisou decidir
+
+**654 pares mútuos**: A é sócia de B e B é sócia de A. Simetrizar sem colapsar o
+par não ordenado poria o mesmo vizinho duas vezes na mesma linha, e nada
+reclamaria — `indptr` fecharia, o total bateria, e só o grau desses nós viria
+inflado.
+
+**9.049 laços** — empresa sócia de si mesma — são descartados e contados. Trinta
+nós tinham como único vínculo um laço, e ficam no CSR com grau zero: eles são nós
+porque tinham vínculo, e não têm vizinho porque o vínculo que tinham não leva a
+lugar nenhum.
+
+**`mmap` economizou partida, não memória.** O CSR inteiro são 123,5 MiB e caberia
+na memória com folga. Abrir custa 0,07 MiB e nenhuma desserialização; cem mil
+acessos aleatórios trazem 110 MiB. O ganho é não pagar a leitura na partida, e
+compartilhar as mesmas páginas entre processos.
+
+**A topologia é conferida contra o SciPy.** O mesmo grafo é montado com
+`coo_matrix(...).tocsr()` e comparado array a array nas 17.379.764 posições; os
+componentes são reconferidos por um union-find que parte da lista de arestas, e
+não do CSR. Duas implementações independentes que partem de lados diferentes da
+cadeia só concordam por coincidência se ambas estiverem certas.
 
 Os artefatos são **determinísticos**: duas execuções sobre o mesmo dado produzem
 os mesmos bytes, conferidos por SHA-256.
