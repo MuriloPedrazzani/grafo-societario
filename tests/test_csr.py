@@ -219,40 +219,47 @@ def test_abrir_nao_carrega_o_arquivo(grafo_grande: Grafo) -> None:
 
 
 TOQUES: Final = 32
-"""Linhas tocadas no teste de paginação sob demanda.
+"""Linhas tocadas no teste de acesso aleatório.
 
-O número é baixo de propósito. O Linux lê adiante até 128 KiB por falta de
-página, então tocar muitas linhas de um arquivo de 32 MiB pode trazer o arquivo
-inteiro — e o teste passaria a medir a política de readahead do sistema em vez do
-comportamento deste módulo. Com 32 toques, o pior caso de readahead é 4 MiB, bem
-dentro do teto de 8 MiB que se afirma aqui.
+**Quanto chega por falta de página é decisão do sistema, e não deste módulo.**
+Medido: tocar estas 32 linhas de um arquivo de 32 MiB traz 26,4 MiB no Linux e
+menos de 1 MiB no Windows, porque as políticas de readahead são diferentes.
 
-A medição interessante, com acesso denso sobre o artefato real, está no corpo do
-commit e não neste teste: aqui o que precisa ser verdade em qualquer máquina é
-que o custo acompanha o que foi tocado, e não o tamanho do arquivo.
+Por isso o teste abaixo **não** afirma proporcionalidade. Uma versão anterior
+dele afirmava, passava no Windows e reprovava no CI — e a reprovação estava
+certa: a afirmação era falsa, e afrouxar o limiar até passar teria sido ajustar a
+asserção à plataforma em vez de corrigir a frase.
+
+O que é verdade em qualquer máquina, e o que o módulo promete, é que a memória
+chega **no acesso** e não na abertura. Sobre o artefato real, cem mil acessos
+aleatórios trazem 89% dos 123,5 MiB — o que confirma, e não contradiz, o motivo
+pelo qual `mmap` foi escolhido: ele economiza partida, não memória.
 """
 
 
-def test_acesso_aleatorio_pagina_sob_demanda(grafo_grande: Grafo) -> None:
-    """O segundo momento, e o que interessa.
+def test_a_memoria_chega_no_acesso_e_nao_na_abertura(grafo_grande: Grafo) -> None:
+    """O segundo momento, e o que ele de fato mostra.
 
-    `mmap` não é "nunca carrega", é "carrega sob demanda": a memória residente
-    acompanha o que foi tocado. Tocar 32 das 1.024 linhas traz as páginas
-    correspondentes, e o crescimento fica muito abaixo dos 32 MiB do arquivo — o
-    que se afirma é a proporcionalidade, não que o custo seja zero.
+    `mmap` não é "nunca carrega", é "carrega sob demanda". O custo existe, e é
+    pago quando a página é tocada — não quando o arquivo é aberto. É a diferença
+    entre adiar o trabalho e evitá-lo, e só a primeira é verdade aqui.
     """
     gc.collect()
-    antes = residente()
-
+    ao_abrir = residente()
     aleatorio = np.random.default_rng(42)
+
     for no in aleatorio.permutation(grafo_grande.nos)[:TOQUES]:
         int(grafo_grande.vizinhos(int(no))[0])
 
-    crescimento = residente() - antes
-    inteiro = grafo_grande.posicoes * 4
-    assert crescimento < inteiro // 4, (
-        f"tocar {TOQUES} linhas custou {crescimento / MIB:.1f} MiB de um arquivo de "
-        f"{inteiro / MIB:.0f} MiB — não está paginando sob demanda"
+    crescimento = residente() - ao_abrir
+    assert crescimento > 0, (
+        "acessar tem de trazer página: se a residente não muda, ou o arquivo já veio "
+        "inteiro na abertura, ou o medidor não está vendo o mapeamento"
+    )
+    assert crescimento <= grafo_grande.posicoes * 4, (
+        f"{crescimento / MIB:.1f} MiB para um indices de "
+        f"{grafo_grande.posicoes * 4 / MIB:.0f} MiB — mais do que o arquivo inteiro não "
+        "pode vir do arquivo"
     )
 
 
