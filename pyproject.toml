@@ -51,6 +51,10 @@ dev = [
     # que uma implementação que carregasse tudo também acertaria.
     "psutil>=6.0",
     "types-psutil>=6.0",
+    # Geração de casos para os testes de propriedade da travessia. O valor
+    # dele aqui é achar a forma de grafo que ninguém escreveria à mão, e
+    # reduzir o contraexemplo ao caso mínimo.
+    "hypothesis>=6.100",
 ]
 
 [project.urls]

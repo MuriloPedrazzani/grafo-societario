@@ -37,3 +37,4 @@ repos:
           - numpy>=2.0
           - scipy-stubs>=1.14
           - types-psutil>=6.0
+          - hypothesis>=6.100
