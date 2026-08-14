@@ -24,6 +24,10 @@ dependencies = [
     "typer>=0.15",
     "duckdb>=1.1",
     "numpy>=2.0",
+    # O serving. Nem FastAPI nem uvicorn chegam perto do motor de ETL: o
+    # caminho de resposta lê arrays com NumPy e a biblioteca padrão.
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
 ]
 
 [project.scripts]
