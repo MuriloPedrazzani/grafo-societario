@@ -256,11 +256,21 @@ def abrir_catalogo(config: Config, competencia: str | None = None) -> Catalogo:
     # depender da versão do NumPy: dois nós nunca empatam aqui, mas afirmar isso
     # sem garantir custaria o mesmo que garantir.
     ordem = np.argsort(no_por_cnpj, kind="stable")
+    no_crescente = no_por_cnpj[ordem]
+    cnpj_do_no_crescente = cnpj_ordenado[ordem]
+    # Os mapeamentos abrem em modo "r" e já recusam escrita; estes dois nascem da
+    # ordenação, em memória comum, e sairiam graváveis. O catálogo é aberto uma vez
+    # e lido por várias threads ao mesmo tempo — o threadpool para onde o uvicorn
+    # manda endpoint síncrono —, e array gravável compartilhado entre threads é a
+    # combinação que não pode existir aqui. Nada escreve neles hoje, mas isso é
+    # convenção, e a guarda custa duas linhas.
+    no_crescente.flags.writeable = False
+    cnpj_do_no_crescente.flags.writeable = False
 
     catalogo = Catalogo(
         cnpj_ordenado=cnpj_ordenado,
-        no_crescente=no_por_cnpj[ordem],
-        cnpj_do_no_crescente=cnpj_ordenado[ordem],
+        no_crescente=no_crescente,
+        cnpj_do_no_crescente=cnpj_do_no_crescente,
         no_por_cnpj=no_por_cnpj,
         atributos=mapear("atributos.npy"),
         regiao_fiscal=mapear("regiao_fiscal.npy"),

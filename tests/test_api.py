@@ -8,19 +8,40 @@ balanceador já ter mandado tráfego.
 
 from __future__ import annotations
 
+import builtins
+import os
 import subprocess
 import sys
+import zlib
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import fields
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from grafo_societario.api.main import ErroDePartida, carregar_acervo, criar_aplicacao
+from grafo_societario.api.deps import (
+    Acervo,
+    AcervoDep,
+    AcervoIndisponivelError,
+    ErroDePartida,
+    carregar_acervo,
+)
+from grafo_societario.api.main import criar_aplicacao
 from grafo_societario.config import Config
 from grafo_societario.graph.artefatos import ARTEFATOS_PUBLICAVEIS, somas_dos_artefatos
 from grafo_societario.graph.build import gerar_arestas, gerar_nos, serializar_csr
-from grafo_societario.graph.catalogo import ArtefatoAusenteError, ArtefatosIncompativeisError
+from grafo_societario.graph.catalogo import (
+    ArtefatoAusenteError,
+    ArtefatosIncompativeisError,
+    Catalogo,
+    abrir_catalogo,
+)
 from grafo_societario.graph.components import calcular_componentes
 from grafo_societario.graph.csr import ArtefatoAusenteError as CsrAusenteError
 from grafo_societario.graph.metadados import serializar_metadados
@@ -83,6 +104,94 @@ def pronto(tmp_path: Path) -> Config:
 
 def pasta(config: Config) -> Path:
     return config.data_dir / "grafo" / "2026-06"
+
+
+# ------------------------------------------------------------------ os instrumentos
+
+
+@contextmanager
+def contar_aberturas(pasta_do_grafo: Path) -> Iterator[list[str]]:
+    """Nomes dos arquivos da pasta do grafo **abertos** enquanto o bloco roda.
+
+    Conta abertura, e não leitura. `mmap` lê por falta de página, sem passar por
+    aqui, e é assim que ele foi feito: quem promete "a segunda requisição não
+    relê disco" promete o que o `mmap` não faz. O que dá para prometer é que o
+    artefato não é **reaberto** — ver o topo de `api/deps.py`.
+    """
+    original = builtins.open
+    vistas: list[str] = []
+
+    def espiao(arquivo: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            caminho: Path | None = Path(os.fspath(arquivo))
+        except TypeError:  # descritor numérico, que não é caminho de nada
+            caminho = None
+        if caminho is not None and caminho.parent == pasta_do_grafo:
+            vistas.append(caminho.name)
+        return original(arquivo, *args, **kwargs)
+
+    with mock.patch("builtins.open", espiao):
+        yield vistas
+
+
+@contextmanager
+def contar_descompressoes() -> Iterator[list[int]]:
+    """Tamanho de cada bloco `zlib` aberto enquanto o bloco roda."""
+    original = zlib.decompress
+    tamanhos: list[int] = []
+
+    def espiao(dado: Any, *args: Any, **kwargs: Any) -> Any:
+        aberto = original(dado, *args, **kwargs)
+        tamanhos.append(len(aberto))
+        return aberto
+
+    with mock.patch("zlib.decompress", espiao):
+        yield tamanhos
+
+
+def _arrays_do(acervo: Acervo) -> list[tuple[str, np.ndarray[Any, np.dtype[Any]]]]:
+    """Todo array alcançável a partir do acervo, com o nome de onde ele veio.
+
+    Varre os campos em vez de listá-los para que um array acrescentado adiante
+    entre na conferência sem ninguém lembrar de incluí-lo.
+    """
+    donos: tuple[Any, ...] = (acervo, acervo.grafo, acervo.catalogo)
+    return [
+        (f"{type(dono).__name__}.{campo.name}", valor)
+        for dono in donos
+        for campo in fields(dono)
+        if isinstance(valor := getattr(dono, campo.name), np.ndarray)
+    ]
+
+
+def _ler_tudo(acervo: Acervo) -> list[tuple[Any, ...]]:
+    """Uma leitura de cada coisa que uma resposta faz, sobre todos os nós."""
+    return [
+        (
+            acervo.catalogo.nome_de(no),
+            acervo.catalogo.tipo_de(no),
+            acervo.catalogo.cnpj_basico_de(no),
+            acervo.catalogo.confianca_de(no),
+            acervo.catalogo.regiao_de(no),
+            tuple(int(vizinho) for vizinho in acervo.grafo.vizinhos(no)),
+            int(acervo.componentes[no]),
+        )
+        for no in range(acervo.nos)
+    ]
+
+
+def _no_com_nome(catalogo: Catalogo) -> int:
+    for indice in range(catalogo.nos):
+        if catalogo.nome_de(indice) is not None:
+            return indice
+    raise AssertionError("a fixture precisa de ao menos um nó com nome")
+
+
+def _no_sem_nome(catalogo: Catalogo) -> int:
+    for indice in range(catalogo.nos):
+        if catalogo.nome_de(indice) is None:
+            return indice
+    raise AssertionError("a fixture precisa de ao menos um nó sem nome")
 
 
 # ------------------------------------------------ a aplicação sobe e diz o que carregou
@@ -201,6 +310,161 @@ def test_o_acervo_carrega_uma_vez_e_registra_o_custo(pronto: Config) -> None:
     assert acervo.nos == 3
     assert acervo.arestas == 2
     assert acervo.catalogo.nos == acervo.grafo.nos
+
+
+# ------------------------------------------- carrega uma vez: não reabre o artefato
+
+
+def test_o_contador_de_aberturas_enxerga_quem_reabre(pronto: Config) -> None:
+    """Controle negativo do instrumento, sem o qual "zero aberturas" não vale nada.
+
+    Uma rota que recarrega o acervo a cada requisição é exatamente o defeito que
+    o teste seguinte precisa excluir. Se o contador não enxerga nem ela, ele não
+    enxerga coisa nenhuma, e o zero dele seria um zero de instrumento cego.
+    """
+    app = criar_aplicacao(pronto)
+
+    @app.get("/_recarrega")
+    def recarrega() -> dict[str, int]:
+        return {"nos": carregar_acervo(pronto).nos}
+
+    with TestClient(app) as cliente, contar_aberturas(pasta(pronto)) as vistas:
+        assert cliente.get("/_recarrega").status_code == 200
+
+    assert set(ARTEFATOS_PUBLICAVEIS) <= set(vistas)
+
+
+def test_a_segunda_requisicao_nao_reabre_o_artefato(pronto: Config) -> None:
+    """O que o `mmap` comprou foi partida, e é isso que este teste protege.
+
+    Não é "não relê disco": `mmap` relê por falta de página, e a Fase 4 mediu o
+    tamanho disso — abrir custa 0,07 MiB residentes e cem mil acessos aleatórios
+    trazem +110 MiB. O que não pode acontecer é reabrir o artefato, remapear os
+    arrays ou recalcular o SHA-256 de 416 MB a cada health check.
+    """
+    # O contador entra primeiro de propósito: a partida é o controle positivo dele.
+    with (
+        contar_aberturas(pasta(pronto)) as vistas,
+        TestClient(criar_aplicacao(pronto)) as cliente,
+    ):
+        na_partida = list(vistas)
+        vistas.clear()
+        for _ in range(3):
+            assert cliente.get("/health").status_code == 200
+        depois_das_requisicoes = list(vistas)
+
+    assert set(ARTEFATOS_PUBLICAVEIS) <= set(na_partida), "a partida abre tudo, e é ela que paga"
+    assert depois_das_requisicoes == []
+
+
+def test_toda_requisicao_recebe_o_mesmo_acervo(pronto: Config) -> None:
+    """A injeção entrega o objeto da partida, e não uma cópia por requisição.
+
+    Cópia por requisição não falha teste nenhum de conteúdo — ela responde igual.
+    Falha o relógio e a memória, que é a forma de defeito que este projeto trata
+    como a pior.
+    """
+    app = criar_aplicacao(pronto)
+    vistos: list[Acervo] = []
+
+    @app.get("/_espiar")
+    def espiar(acervo: AcervoDep) -> dict[str, str]:
+        vistos.append(acervo)
+        return {"competencia": acervo.competencia}
+
+    with TestClient(app) as cliente:
+        for _ in range(3):
+            assert cliente.get("/_espiar").status_code == 200
+
+    assert len(vistos) == 3
+    assert all(visto is vistos[0] for visto in vistos)
+
+
+def test_rota_sem_lifespan_diz_que_o_acervo_nao_foi_carregado(pronto: Config) -> None:
+    """Falta de acervo numa rota é erro de montagem, e a mensagem tem de dizer isso.
+
+    `None` devolvido aqui viraria `AttributeError` fundo adentro, longe da causa.
+    """
+    cliente = TestClient(criar_aplicacao(pronto))  # sem `with`, o lifespan não roda
+
+    with pytest.raises(AcervoIndisponivelError, match="lifespan"):
+        cliente.get("/health")
+
+
+# --------------------------------------- concorrência: o acervo é lido por muitas threads
+
+
+def test_o_catalogo_descomprime_de_novo_a_cada_leitura_do_mesmo_no(pronto: Config) -> None:
+    """Não há cache de bloco descomprimido, e a ausência é decisão medida.
+
+    Contra o artefato real de 2026-06: um nome custa 343 µs, o mesmo nó relido
+    custa os mesmos 343 µs, um caminho de 21 nós custa ~3,8 ms — e com 8 threads
+    o custo por nome cai para 77 µs, porque o `zlib` solta a GIL enquanto
+    descomprime.
+
+    Se este teste falhar, alguém acrescentou cache. Ele é estado mutável
+    compartilhado entre requisições simultâneas, e o lock que o protegeria
+    serializaria justamente o único trecho que hoje escala.
+    """
+    catalogo = abrir_catalogo(pronto)
+    alvo = _no_com_nome(catalogo)
+
+    with contar_descompressoes() as tamanhos:
+        primeira = catalogo.nome_de(alvo)
+        segunda = catalogo.nome_de(alvo)
+
+    assert primeira == segunda
+    assert len(tamanhos) == 2
+
+
+def test_no_sem_nome_nao_chega_a_abrir_bloco(pronto: Config) -> None:
+    """Controle do instrumento, e propriedade real do artefato publicável.
+
+    Pessoa física tem faixa vazia de nome, e ler o nome dela não descomprime
+    nada — é o que faz o contador acima medir descompressão, e não chamada.
+    """
+    catalogo = abrir_catalogo(pronto)
+    alvo = _no_sem_nome(catalogo)
+
+    with contar_descompressoes() as tamanhos:
+        assert catalogo.nome_de(alvo) is None
+
+    assert tamanhos == []
+
+
+def test_a_leitura_concorrente_do_acervo_devolve_o_mesmo_que_a_serial(pronto: Config) -> None:
+    """O uvicorn manda endpoint síncrono para threadpool: o mesmo `Acervo` atende
+    requisições simultâneas.
+
+    Isso só é seguro porque não há estado mutável — nem cache de bloco, nem array
+    gravável. No dia em que houver, é aqui que a falta de sincronização aparece.
+    """
+    acervo = carregar_acervo(pronto)
+    serial = _ler_tudo(acervo)
+
+    with ThreadPoolExecutor(max_workers=8) as piscina:
+        paralelo = list(piscina.map(lambda _: _ler_tudo(acervo), range(32)))
+
+    assert all(leitura == serial for leitura in paralelo)
+
+
+def test_nenhum_array_do_acervo_e_gravavel(pronto: Config) -> None:
+    """Compartilhado entre threads e gravável é a combinação que não pode existir.
+
+    Os mapeamentos abrem em modo `"r"` e já recusam escrita. Os dois arrays que o
+    catálogo deriva na abertura nascem em memória comum e sairiam graváveis:
+    nada escreve neles hoje, mas isso é convenção, e convenção não sobrevive ao
+    próximo commit que passar por perto.
+    """
+    acervo = carregar_acervo(pronto)
+    arrays = _arrays_do(acervo)
+
+    graveis = [nome for nome, array in arrays if array.flags.writeable]
+
+    assert len(arrays) >= len(ARTEFATOS_PUBLICAVEIS), (
+        "o varredor não achou os arrays do acervo; sem isso, ver zero gravável não prova nada"
+    )
+    assert not graveis, f"gravável e compartilhado entre requisições: {', '.join(graveis)}"
 
 
 # ------------------------- a fronteira entre serving e construção
