@@ -49,6 +49,7 @@ from fastapi import HTTPException
 from grafo_societario.api.cnpj import Cnpj, CnpjInvalidoError, analisar, formatar
 from grafo_societario.api.deps import Acervo
 from grafo_societario.api.schemas import NoDaResposta
+from grafo_societario.graph.catalogo import PESSOA_JURIDICA
 
 
 @dataclass(frozen=True)
@@ -106,8 +107,32 @@ def resolver(acervo: Acervo, *cnpjs: Cnpj) -> tuple[Ponta, ...]:
     return pontas
 
 
-def no_da_resposta(acervo: Acervo, indice: int) -> NoDaResposta:
+def rotulo_de(tipo: str, posicao: int) -> str | None:
+    """Como chamar um nó que não tem nome público, **a partir da posição dele**.
+
+    É a propriedade que o identificador de pessoa física não tinha, e que o
+    derrubou do artefato: aquele hash era o mesmo em toda consulta, o que fazia
+    dele uma chave para correlacionar respostas e remontar a pessoa. O rótulo
+    morre com a resposta — a mesma pessoa, alcançada por outro par de empresas,
+    recebe outro número.
+
+    Derivá-lo da identidade do nó, de qualquer forma, reabre aquele vetor. Há
+    teste construindo duas consultas em que o mesmo nó ocupa posições diferentes
+    e exigindo rótulos diferentes.
+    """
+    return None if tipo == PESSOA_JURIDICA else f"Sócio {posicao + 1}"
+
+
+def no_da_resposta(acervo: Acervo, indice: int, posicao: int) -> NoDaResposta:
     """Um nó do catálogo na forma que a resposta mostra.
+
+    **A pseudonimização é conferida aqui de novo, e não porque o artefato falhou.**
+    Com `EXPOR_PF` desligada o nome de pessoa já é nulo no artefato — a decisão é
+    da geração, e é ela que importa, porque o arquivo vai para GitHub Release e
+    para imagem Docker. Mas nada impede alguém de servir um artefato construído
+    localmente **com** os nomes, e aí a borda é a última porta. Duas portas com a
+    mesma chave não são redundância: a de dentro protege o que foi publicado, a
+    de fora protege o que está sendo servido.
 
     Custa **uma descompressão de bloco `zlib`** por nó com nome, medida em 0,35
     ms no artefato real. Num caminho isso é irrelevante — vinte e poucos nós —,
@@ -115,9 +140,14 @@ def no_da_resposta(acervo: Acervo, indice: int) -> NoDaResposta:
     nós. É o que faz o teto de nós ser orçamento de latência, e não de bytes.
     """
     cnpj_basico = acervo.catalogo.cnpj_basico_de(indice)
+    tipo = acervo.catalogo.tipo_de(indice)
+    nome = acervo.catalogo.nome_de(indice)
+    if tipo != PESSOA_JURIDICA and not acervo.config.expor_pf:
+        nome = None
     return NoDaResposta(
-        tipo=acervo.catalogo.tipo_de(indice),
-        nome=acervo.catalogo.nome_de(indice),
+        tipo=tipo,
+        nome=nome,
+        rotulo=rotulo_de(tipo, posicao),
         cnpj=None if cnpj_basico is None else formatar(int(cnpj_basico)),
         regiao_fiscal=acervo.catalogo.regiao_de(indice),
         confianca=acervo.catalogo.confianca_de(indice),

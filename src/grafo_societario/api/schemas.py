@@ -84,8 +84,14 @@ class NoDaResposta(BaseModel):
     tipo: str = Field(description="`pessoa_juridica`, `pessoa_fisica` ou `estrangeiro`.")
     nome: str | None = Field(
         description="Razão social, para pessoa jurídica. **Nulo para pessoa física e para "
-        "estrangeiro**: o nome não entra no artefato publicado, e a decisão é da geração, "
-        "não da resposta."
+        "estrangeiro** enquanto `EXPOR_PF` estiver desligada, que é o padrão e o modo em que "
+        "a instância pública roda. Use `rotulo` para exibir esses nós."
+    )
+    rotulo: str | None = Field(
+        description="Como chamar este nó na tela, quando ele não tem nome público. **É função "
+        "da posição nesta resposta, e de mais nada** — a mesma pessoa consultada por outro par "
+        "de empresas recebe outro rótulo, e por isso ele não serve para correlacionar consultas "
+        "nem para remontar quem é. Nulo para pessoa jurídica, que tem razão social."
     )
     cnpj: str | None = Field(
         description="CNPJ completo da matriz, com o verificador calculado. Nulo para quem "

@@ -271,7 +271,11 @@ def caminho(
         desfecho,
         profundidade_maxima,
         distancia=distancia,
-        caminho=[no_da_resposta(acervo, indice) for indice in achado.nos] if mostrar else [],
+        caminho=[
+            no_da_resposta(acervo, indice, posicao) for posicao, indice in enumerate(achado.nos)
+        ]
+        if mostrar
+        else [],
         visitados=achado.visitados,
     )
 

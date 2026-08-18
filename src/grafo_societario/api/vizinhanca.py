@@ -175,10 +175,12 @@ def consultar_vizinhanca(
         explicacao=_explicar(len(achado.nos), achado.saltos, achado.nivel_recusado),
         nos=[
             NoDaVizinhanca(
-                **no_da_resposta(acervo, no).model_dump(),
+                **no_da_resposta(acervo, no, lugar).model_dump(),
                 profundidade=profundidade,
             )
-            for no, profundidade in zip(achado.nos, achado.profundidades, strict=True)
+            for lugar, (no, profundidade) in enumerate(
+                zip(achado.nos, achado.profundidades, strict=True)
+            )
         ],
         arestas=[(posicao[de], posicao[para]) for de, para in achado.arestas],
         saltos_pedidos=achado.saltos_pedidos,
