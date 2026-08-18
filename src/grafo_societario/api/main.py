@@ -34,7 +34,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from grafo_societario import __version__
-from grafo_societario.api import caminho
+from grafo_societario.api import caminho, empresa, vizinhanca
 from grafo_societario.api.deps import AcervoDep, ciclo
 from grafo_societario.config import Config
 
@@ -52,6 +52,8 @@ def criar_aplicacao(config: Config | None = None) -> FastAPI:
     if config is not None:
         app.state.config = config
     app.include_router(caminho.roteador)
+    app.include_router(vizinhanca.roteador)
+    app.include_router(empresa.roteador)
 
     @app.get("/health", tags=["operação"])
     def health(acervo: AcervoDep) -> dict[str, Any]:

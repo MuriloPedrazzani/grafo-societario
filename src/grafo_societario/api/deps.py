@@ -67,6 +67,7 @@ from grafo_societario.config import Config, carregar_config
 from grafo_societario.graph.artefatos import somas_dos_artefatos
 from grafo_societario.graph.catalogo import Catalogo, abrir_catalogo, procurar
 from grafo_societario.graph.csr import Grafo, abrir_grafo, carregar_componentes
+from grafo_societario.graph.metrics import tamanhos_de_componente
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,13 @@ class Acervo:
     grafo: Grafo
     catalogo: Catalogo
     componentes: np.ndarray[Any, np.dtype[np.int32]]
+    tamanhos_de_componente: np.ndarray[Any, np.dtype[np.int32]]
+    """Quantos nós tem cada componente, indexado pelo rótulo.
+
+    **Derivado na partida, e não gravado** — é a mesma regra do commit 30: um
+    `bincount` sobre os rótulos custa 11,4 MB de memória e zero byte de artefato,
+    sobre um orçamento de deploy que já está em 416,1 MB de 500."""
+
     existencia: np.ndarray[Any, np.dtype[np.int32]]
     somas: dict[str, str]
     segundos_de_partida: float
@@ -121,6 +129,15 @@ class Acervo:
         """
         posicao = procurar(self.existencia, cnpj_basico)
         return posicao < self.existencia.size and int(self.existencia[posicao]) == cnpj_basico
+
+    def tamanho_do_componente(self, indice: int) -> int:
+        """Quantos nós há no componente deste nó, **dentro do recorte**.
+
+        É piso, e não total, pela mesma razão que `vinculos_no_recorte`: só foram
+        ingeridos sócios de empresas cuja matriz está na UF alvo, então um
+        componente que continua noutra UF aparece cortado aqui.
+        """
+        return int(self.tamanhos_de_componente[int(self.componentes[indice])])
 
 
 def carregar_acervo(config: Config, competencia: str | None = None) -> Acervo:
@@ -154,12 +171,18 @@ def carregar_acervo(config: Config, competencia: str | None = None) -> Acervo:
         )
     existencia = np.load(existencia_npy, mmap_mode="r")
 
+    # Derivado, nunca gravado: 11,4 MB de memória contra byte nenhum de artefato.
+    # Sai read-only porque o acervo é lido por várias threads ao mesmo tempo.
+    tamanhos = tamanhos_de_componente(componentes).astype(np.int32)
+    tamanhos.flags.writeable = False
+
     acervo = Acervo(
         config=config,
         competencia=alvo,
         grafo=grafo,
         catalogo=catalogo,
         componentes=componentes,
+        tamanhos_de_componente=tamanhos,
         existencia=existencia,
         somas=somas_dos_artefatos(origem),
         segundos_de_partida=time.monotonic() - comeco,

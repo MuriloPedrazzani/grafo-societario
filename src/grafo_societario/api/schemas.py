@@ -145,3 +145,77 @@ class RespostaDeCaminho(BaseModel):
         description="Nós tocados pela travessia. Zero quando a resposta saiu do rótulo de "
         "componente, sem percorrer nada."
     )
+
+
+class NoDaVizinhanca(NoDaResposta):
+    """Um nó do subgrafo, com a distância até a empresa consultada."""
+
+    profundidade: int = Field(
+        description="Saltos até a empresa consultada. Zero é ela mesma. Nó de borda mostra "
+        "menos vizinhos do que tem — é inerente a qualquer recorte por distância, e por isso "
+        "`vinculos_no_recorte` traz o número real e não o desenhado."
+    )
+
+
+class RespostaDeVizinhanca(BaseModel):
+    """O subgrafo induzido em volta de uma empresa."""
+
+    cnpj: str
+    tem_vinculo: bool = Field(
+        description="Se a empresa é nó do grafo. Falso em 74,8% do recorte, e aí não há "
+        "vizinhança nenhuma a devolver — o que **não** é o mesmo que a empresa não existir."
+    )
+    explicacao: str = Field(description="O resultado em uma frase, para a interface exibir.")
+    nos: list[NoDaVizinhanca] = Field(
+        description="Em ordem crescente de índice interno, incluindo a própria empresa."
+    )
+    arestas: list[tuple[int, int]] = Field(
+        description="Pares de **posições na lista `nos` desta resposta** — não são índices do "
+        "grafo, que nunca saem na API. Menor à esquerda, cada aresta uma vez. São as arestas "
+        "**induzidas**, incluindo as do mesmo nível: é o que revela ciclo, que a árvore de "
+        "busca esconderia."
+    )
+    saltos_pedidos: int
+    saltos: int = Field(description="Profundidade do nível mais fundo presente na resposta.")
+    teto_de_nos: int
+    truncada: bool = Field(
+        description="Se algum nível foi recusado por teto. **Não é `saltos < saltos_pedidos`**: "
+        "um componente pequeno se esgota antes do pedido e a resposta continua completa."
+    )
+    nivel_recusado: int = Field(
+        description="Quantos nós teria o primeiro nível que não coube. Zero quando nada foi "
+        "recusado. O número é informação por si só — diz o tamanho do que não está sendo visto, "
+        "e quanto pedir de teto para vê-lo."
+    )
+
+
+class RespostaDeEmpresa(BaseModel):
+    """O que se sabe sobre uma empresa, sem os vizinhos dela.
+
+    Quem quer os vizinhos chama `/vizinhanca`. As duas rotas têm domínios
+    diferentes, e não recortes diferentes do mesmo domínio: esta responde também
+    sobre as 14,8 milhões de empresas que existem no recorte e não são nós do
+    grafo, sobre as quais `/vizinhanca` não teria o que devolver.
+    """
+
+    cnpj: str
+    tem_vinculo: bool = Field(description="Se a empresa é nó do grafo. Falso em 74,8% do recorte.")
+    explicacao: str = Field(description="O resultado em uma frase, para a interface exibir.")
+    nome: str | None = Field(
+        description="Razão social. **Nula quando a empresa não tem vínculo**, e isso não é dado "
+        "faltando: o artefato publicado carrega apenas os nós do grafo, e empresa sem vínculo "
+        "não é nó. Ver `explicacao`."
+    )
+    no_recorte: bool | None = Field(
+        description="Se a matriz está na UF do recorte. Falso identifica o **conector**: "
+        "empresa de outra UF que aparece por ser sócia de uma daqui."
+    )
+    vinculos_no_recorte: int = Field(
+        description="Vínculos **dentro do recorte**, e portanto **piso, nunca total**. Zero "
+        "quando a empresa não é nó do grafo."
+    )
+    tamanho_do_componente_no_recorte: int | None = Field(
+        description="Quantos nós há no componente conexo desta empresa, **dentro do recorte** — "
+        "também piso, porque um componente que continua noutra UF aparece cortado. Nulo quando "
+        "a empresa não é nó. Derivado na partida, e não gravado no artefato."
+    )
