@@ -1,0 +1,237 @@
+"""A forma da resposta, e o campo que impede o consumidor de errar sozinho.
+
+## Cinco desfechos, todos `200`, em campo de primeiro nível
+
+A travessia da Fase 5 distingue quatro finais e **só um deles afirma ausência**.
+A API acrescenta um quinto, que não vem da travessia: `sem_vinculo`, que sai de
+`existencia.npy` combinado com "esta empresa não é nó do grafo".
+
+| desfecho | significa | afirma ausência? |
+|---|---|---|
+| `encontrado` | achou caminho, e ele cabe no limite pedido | — |
+| `sem_vinculo` | a empresa existe no recorte e não tem vínculo nenhum | sim |
+| `componentes_diferentes` | as duas têm vínculos e não se alcançam | sim |
+| `alem_do_limite` | há caminho, **a esta distância**, mais longo que o pedido | **não** |
+| `orcamento_excedido` | há caminho, a busca desistiu antes | **não** |
+
+`alem_do_limite` **afirma presença**, e não ignorância: a busca vai até o fim, e
+o que o limite decide é se o caminho é exibido. `orcamento_excedido` é o único
+"não sei" que sobrou.
+
+Nenhum deles é erro de HTTP. `404` fica reservado a CNPJ ausente do recorte, que
+é outra coisa: o pedido referencia empresa que não existe.
+
+## `afirma_ausencia` existe porque a distinção é fácil de perder
+
+Os nomes dos desfechos são explícitos, e ainda assim quem escreve uma interface
+tem de saber de cabeça quais dois dos cinco autorizam mostrar "não há vínculo".
+Errar isso é gratuito: `alem_do_limite` renderizado como "sem vínculo" é uma
+afirmação falsa sobre empresa real, entregue com cara de resposta.
+
+O campo booleano tira a decisão do consumidor. Junto vai `explicacao`, em
+português, porque a interface da Fase 7 precisa de uma frase e inventá-la seria
+inventar a semântica de novo, do lado de fora.
+
+## O nome do campo é a última chance de a ressalva chegar
+
+`vinculos_no_recorte` não se chama `grau`, e a diferença não é de estilo. Só
+foram ingeridos sócios de empresas cuja matriz está na UF alvo, então o número é
+**piso e nunca total**: quem participa de 3 empresas em SP e 40 no Rio aparece
+com 3.
+
+A coluna nasceu com esse nome no commit 19, o README tem uma seção sobre isso, e
+a distinção atravessou três fases. `"grau": 3` num JSON se lê como "tem 3
+sócios", que é falso — e a serialização seria o último metro, onde ninguém mais
+teria como corrigir. Vale igual para tamanho de componente: é componente
+**dentro do recorte**, e o nome do campo diz isso.
+
+## `sem_vinculo` não pode virar `componentes_diferentes`
+
+Os dois afirmam ausência, e por isso a tentação de fundi-los. Mas
+`componentes_diferentes` diz que a empresa **tem** vínculos e eles não chegam à
+outra; `sem_vinculo` diz que ela não tem vínculo nenhum. O segundo descreve 74,8%
+do recorte — é o efeito do empresário individual, cujo dono está na razão social
+e que o projeto recusou deliberadamente extrair. Apagar essa distinção apagaria o
+custo medido daquela decisão.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+from pydantic import BaseModel, Field
+
+
+class DesfechoDaConsulta(StrEnum):
+    """Os cinco finais possíveis de uma consulta de caminho.
+
+    São os quatro de `graph.traversal.Desfecho` mais `SEM_VINCULO`, que a API
+    produz sozinha. A conversão entre os dois conjuntos é um `match` exaustivo,
+    conferido pelo mypy: desfecho novo na travessia não compila até ser tratado
+    aqui.
+    """
+
+    ENCONTRADO = "encontrado"
+    SEM_VINCULO = "sem_vinculo"
+    COMPONENTES_DIFERENTES = "componentes_diferentes"
+    ALEM_DO_LIMITE = "alem_do_limite"
+    ORCAMENTO_EXCEDIDO = "orcamento_excedido"
+
+
+class NoDaResposta(BaseModel):
+    """Um nó do caminho: empresa, pessoa física ou sócio estrangeiro."""
+
+    tipo: str = Field(description="`pessoa_juridica`, `pessoa_fisica` ou `estrangeiro`.")
+    nome: str | None = Field(
+        description="Razão social, para pessoa jurídica. **Nulo para pessoa física e para "
+        "estrangeiro** enquanto `EXPOR_PF` estiver desligada, que é o padrão e o modo em que "
+        "a instância pública roda. Use `rotulo` para exibir esses nós."
+    )
+    rotulo: str | None = Field(
+        description="Como chamar este nó na tela, quando ele não tem nome público. **É função "
+        "da posição nesta resposta, e de mais nada** — a mesma pessoa consultada por outro par "
+        "de empresas recebe outro rótulo, e por isso ele não serve para correlacionar consultas "
+        "nem para remontar quem é. Nulo para pessoa jurídica, que tem razão social."
+    )
+    cnpj: str | None = Field(
+        description="CNPJ completo da matriz, com o verificador calculado. Nulo para quem "
+        "não é pessoa jurídica."
+    )
+    regiao_fiscal: str | None = Field(
+        description="Dígito da região fiscal do CPF, de pessoa física. Substitui a máscara do "
+        "CPF, que era chave de junção de volta à fonte pública."
+    )
+    confianca: str = Field(
+        description="Como a identidade deste nó foi estabelecida: `exata` para pessoa "
+        "jurídica, `estimada` para pessoa física, `fraca` para estrangeiro — que não tem "
+        "documento nenhum, e cuja fusão é materialmente mais frágil — e `nao_fundivel` para "
+        "sócio sem nome."
+    )
+    taxa_de_colisao: float | None = Field(
+        description="Probabilidade de esta identidade ser **duas pessoas diferentes fundidas**. "
+        "A máscara do CPF deixa seis dígitos visíveis, então dois homônimos colidem se "
+        "compartilharem os seis — e o último deles é a região fiscal, que num recorte de SP é "
+        "`8` em 86,65% dos casos. Por isso a taxa é medida por região, e não estimada de boca. "
+        "**Nula sempre que `confianca` não é `estimada`, e aí o próprio `confianca` diz o "
+        "motivo**: identidade exata não é fundida, estrangeiro não tem documento, e sócio sem "
+        "nome não é fundido com ninguém. Nulo é a grandeza não se aplicar, e não dado faltando "
+        "— zero afirmaria colisão impossível."
+    )
+    no_recorte: bool | None = Field(
+        description="Se a empresa tem matriz na UF do recorte. Falso identifica o **conector**: "
+        "empresa de outra UF que aparece por ser sócia de uma daqui, e cujos demais vínculos "
+        "não foram ingeridos."
+    )
+    vinculos_no_recorte: int = Field(
+        description="Vínculos deste nó **dentro do recorte**. É **piso, nunca total**: só foram "
+        "ingeridos sócios de empresas cuja matriz está na UF alvo, então quem participa de 3 "
+        "empresas em SP e 40 no Rio aparece aqui com 3. O campo não se chama `grau` de "
+        "propósito — `grau` se lê como número absoluto, e este não é."
+    )
+
+
+class RespostaDeCaminho(BaseModel):
+    """O caminho societário entre duas empresas, ou por que não há um."""
+
+    desfecho: DesfechoDaConsulta
+    afirma_ausencia: bool = Field(
+        description="Se este desfecho autoriza dizer que não há vínculo. Verdadeiro apenas em "
+        "`sem_vinculo` e `componentes_diferentes`. Nos outros dois negativos o caminho "
+        "**existe** e esta busca não o entregou."
+    )
+    explicacao: str = Field(description="O desfecho em uma frase, para a interface exibir.")
+    de: str
+    para: str
+    distancia: int | None = Field(
+        description="Distância entre as duas empresas, em saltos. Conhecida em `encontrado` e "
+        "**também em `alem_do_limite`**, onde o caminho não é mostrado mas a distância é um "
+        "achado verdadeiro: o vínculo existe e é remoto. Nula quando não há caminho ou quando "
+        "a busca desistiu."
+    )
+    caminho: list[NoDaResposta] = Field(
+        description="Os nós, da origem ao destino. Preenchido **apenas** em `encontrado` — em "
+        "`alem_do_limite` a distância é conhecida e o caminho não é exibido."
+    )
+    profundidade_maxima: int = Field(
+        description="O limite pedido. Ele governa **até onde o caminho é mostrado**, e não até "
+        "onde a busca procura: a busca vai até o fim, com o orçamento de visitados como único "
+        "freio."
+    )
+    visitados: int = Field(
+        description="Nós tocados pela travessia. Zero quando a resposta saiu do rótulo de "
+        "componente, sem percorrer nada."
+    )
+
+
+class NoDaVizinhanca(NoDaResposta):
+    """Um nó do subgrafo, com a distância até a empresa consultada."""
+
+    profundidade: int = Field(
+        description="Saltos até a empresa consultada. Zero é ela mesma. Nó de borda mostra "
+        "menos vizinhos do que tem — é inerente a qualquer recorte por distância, e por isso "
+        "`vinculos_no_recorte` traz o número real e não o desenhado."
+    )
+
+
+class RespostaDeVizinhanca(BaseModel):
+    """O subgrafo induzido em volta de uma empresa."""
+
+    cnpj: str
+    tem_vinculo: bool = Field(
+        description="Se a empresa é nó do grafo. Falso em 74,8% do recorte, e aí não há "
+        "vizinhança nenhuma a devolver — o que **não** é o mesmo que a empresa não existir."
+    )
+    explicacao: str = Field(description="O resultado em uma frase, para a interface exibir.")
+    nos: list[NoDaVizinhanca] = Field(
+        description="Em ordem crescente de índice interno, incluindo a própria empresa."
+    )
+    arestas: list[tuple[int, int]] = Field(
+        description="Pares de **posições na lista `nos` desta resposta** — não são índices do "
+        "grafo, que nunca saem na API. Menor à esquerda, cada aresta uma vez. São as arestas "
+        "**induzidas**, incluindo as do mesmo nível: é o que revela ciclo, que a árvore de "
+        "busca esconderia."
+    )
+    saltos_pedidos: int
+    saltos: int = Field(description="Profundidade do nível mais fundo presente na resposta.")
+    teto_de_nos: int
+    truncada: bool = Field(
+        description="Se algum nível foi recusado por teto. **Não é `saltos < saltos_pedidos`**: "
+        "um componente pequeno se esgota antes do pedido e a resposta continua completa."
+    )
+    nivel_recusado: int = Field(
+        description="Quantos nós teria o primeiro nível que não coube. Zero quando nada foi "
+        "recusado. O número é informação por si só — diz o tamanho do que não está sendo visto, "
+        "e quanto pedir de teto para vê-lo."
+    )
+
+
+class RespostaDeEmpresa(BaseModel):
+    """O que se sabe sobre uma empresa, sem os vizinhos dela.
+
+    Quem quer os vizinhos chama `/vizinhanca`. As duas rotas têm domínios
+    diferentes, e não recortes diferentes do mesmo domínio: esta responde também
+    sobre as 14,8 milhões de empresas que existem no recorte e não são nós do
+    grafo, sobre as quais `/vizinhanca` não teria o que devolver.
+    """
+
+    cnpj: str
+    tem_vinculo: bool = Field(description="Se a empresa é nó do grafo. Falso em 74,8% do recorte.")
+    explicacao: str = Field(description="O resultado em uma frase, para a interface exibir.")
+    nome: str | None = Field(
+        description="Razão social. **Nula quando a empresa não tem vínculo**, e isso não é dado "
+        "faltando: o artefato publicado carrega apenas os nós do grafo, e empresa sem vínculo "
+        "não é nó. Ver `explicacao`."
+    )
+    no_recorte: bool | None = Field(
+        description="Se a matriz está na UF do recorte. Falso identifica o **conector**: "
+        "empresa de outra UF que aparece por ser sócia de uma daqui."
+    )
+    vinculos_no_recorte: int = Field(
+        description="Vínculos **dentro do recorte**, e portanto **piso, nunca total**. Zero "
+        "quando a empresa não é nó do grafo."
+    )
+    tamanho_do_componente_no_recorte: int | None = Field(
+        description="Quantos nós há no componente conexo desta empresa, **dentro do recorte** — "
+        "também piso, porque um componente que continua noutra UF aparece cortado. Nulo quando "
+        "a empresa não é nó. Derivado na partida, e não gravado no artefato."
+    )

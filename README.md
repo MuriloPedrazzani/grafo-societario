@@ -4,7 +4,7 @@
 
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
-> **Status:** em desenvolvimento — Fase 5 de 9. Este README é atualizado a cada fase concluída.
+> **Status:** em desenvolvimento — Fase 6 de 9. Este README é atualizado a cada fase concluída.
 
 ---
 
@@ -30,7 +30,7 @@ Estas restrições são deliberadas e moldam toda a arquitetura:
 |---|---|
 | Roda em 8 GB de RAM | Nada de cluster; teto de memória **declarado** e transbordo para disco — pico medido de **4,27 GiB**, 53% da restrição |
 | Custo zero (free tier) | Sem banco de grafo gerenciado, sem orquestrador dedicado |
-| Artefato de deploy ≤ 500 MB | Grafo em arrays CSR lidos via `mmap` — **443 MB**, 11% de folga |
+| Artefato de deploy ≤ 500 MB | Grafo em arrays CSR lidos via `mmap` — **416,1 MB**, 17% de folga |
 | Recorte por UF da matriz | Parametrizável; o padrão é SP |
 
 ## Memória
@@ -69,9 +69,17 @@ MiB.
 
 O quadro societário inclui nomes de pessoas físicas.
 
-**Compromisso de desenho, ainda não construído (Fase 6):** a API pública pseudonimizará pessoas físicas por padrão — elas aparecerão como identificadores opacos, nunca como nomes. O código é aberto: quem precisar dos nomes reais executa o pipeline localmente com os dados originais.
+**Já construído e verificável hoje:**
 
-**Já construído e verificável hoje**, na camada de transformação:
+**A pessoa física é pseudonimizada, e a decisão acontece na geração.** Com `EXPOR_PF` desligada — o padrão, e o modo em que a instância pública roda — o nome de pessoa física e de sócio estrangeiro **não entra no artefato**. Não é filtro de resposta: os artefatos vão para GitHub Release e para imagem Docker, e nome que entrou no arquivo já saiu. Quem precisa dos nomes reais executa o pipeline localmente com os dados originais, que é para isso que o código é aberto.
+
+Na resposta, essas pessoas recebem um **rótulo local** (`Sócio 2`) que é função da **posição na resposta e de mais nada**. A mesma pessoa, alcançada por outro par de empresas, recebe outro rótulo — então ele não serve para correlacionar consultas nem para remontar quem é.
+
+**A prova é um teste que serve um artefato construído *com* os nomes por uma API configurada *sem* eles**, e exige que a resposta saia limpa. Testar pseudonimização contra um artefato que já não tem nome provaria apenas que não se pode devolver o que não existe — a proteção inteira poderia ser removida e a suíte continuaria verde. Antes dele há um controle positivo exigindo que o artefato realmente guarde os nomes, senão o teste passa por vacuidade.
+
+**Um identificador de pessoa física foi criado e depois removido do artefato.** Ele era `sha256("pessoa_fisica|" + nome + "|" + cpf_mascarado)`, e as duas entradas são públicas: o `Socios` da Receita traz as duas. Enumerar o domínio inteiro e comparar hashes é barato — não é inversão criptográfica, é enumeração. Sal não resolve: publicado, o atacante tem; secreto, quebra a reprodutibilidade do artefato. É a mesma regra que já havia derrubado a máscara de CPF — **chave de junção de volta à fonte** —, aplicada desta vez contra o próprio desenho. A remoção tirou 42,8 MB do artefato de quebra.
+
+E na camada de transformação:
 
 **O CPF sai na transformação, e não dependerá da resposta da API.** A Receita mascara o CPF em toda parte onde teve a chance, mas ele escapa sem máscara dentro da razão social de empresário individual — em **5,2 milhões** de registros só no recorte de São Paulo, 26% do total. Como os artefatos deste projeto são publicados em Release e em imagem Docker, mascarar na resposta não desfaria nada: o dado já teria saído. A supressão acontece na camada que gera os artefatos, e um portão de qualidade varre todos eles antes da publicação, com o varredor validado contra o dado bruto para provar que sabe achar.
 
@@ -157,6 +165,63 @@ Os dois graus médios estão certos; o que muda é o conjunto. Citar 2,79 como "
 
 ---
 
+## A API
+
+Três rotas, todas sobre artefatos pré-computados e imutáveis, lidos com `mmap`. Nenhuma delas carrega DuckDB, SciPy ou leitor de Parquet — há teste em processo limpo exigindo isso.
+
+| rota | responde |
+|---|---|
+| `GET /caminho?de=&para=` | o caminho societário mais curto entre duas empresas, ou por que não há um |
+| `GET /vizinhanca?cnpj=` | o subgrafo **induzido** em volta de uma empresa, com todas as arestas entre os nós devolvidos |
+| `GET /empresa/{cnpj}` | os atributos e as contagens da própria empresa, **sem** os vizinhos |
+
+`/empresa` não devolve vizinhos de propósito. Não é recorte diferente do mesmo domínio: as 14,8 milhões de empresas sem vínculo **não são nós do grafo**, e `/vizinhanca` não teria o que dizer sobre elas. Rotas com domínios diferentes não são a mesma rota com outro nome.
+
+### Os cinco desfechos, e o que cada um afirma
+
+Toda consulta de caminho responde `200` com um campo `desfecho`. **Só dois deles autorizam dizer que não há vínculo**, e a resposta traz um booleano `afirma_ausencia` para o consumidor não precisar saber quais de cabeça:
+
+| desfecho | significa | afirma ausência? |
+|---|---|---|
+| `encontrado` | achou o caminho, e ele cabe no limite pedido | — |
+| `sem_vinculo` | a empresa existe no recorte e não tem vínculo nenhum | **sim** |
+| `componentes_diferentes` | as duas têm vínculos e não se alcançam por caminho nenhum | **sim** |
+| `alem_do_limite` | há caminho, **a esta distância**, mais longo que o pedido | não |
+| `orcamento_excedido` | há caminho, e a busca desistiu antes de achá-lo | não |
+
+Colapsar qualquer um deles em "não encontrado" faria o serviço afirmar que duas empresas não têm vínculo quando a verdade é outra. A conversão dos desfechos da travessia é um `match` com `assert_never`: um desfecho novo **não compila** até ser tratado aqui.
+
+`404` fica reservado a CNPJ que não é nó nem está no recorte, e `422` a CNPJ malformado. Exigimos os quatorze dígitos com verificador — o `cnpj_basico` de oito não tem dígito de controle, e aceitá-lo faria um erro de digitação virar consulta silenciosa a outra empresa.
+
+### Latência medida
+
+Contra o artefato real de 2026-06, com 10.658.250 nós:
+
+| | mediana | p95 | máximo |
+|---|---:|---:|---:|
+| `/caminho`, exemplos curtos | **0,02 ms** | 0,87 ms | 0,94 ms |
+| `/caminho`, pares aleatórios do maior componente, ponta a ponta | **8,01 ms** | 39,74 ms | 74,03 ms |
+| `/vizinhanca`, empresa aleatória | **2,70 ms** | 12,91 ms | 33,67 ms |
+| `/vizinhanca`, empresa de grau alto | 24,03 ms | 274,91 ms | **318,47 ms** |
+
+Para caminho curto, **o framework custa mais que o grafo**: a travessia leva 0,78 ms dentro de uma resposta HTTP de poucos milissegundos. Numa vizinhança grande o custo é outro — 96% dele é descompressão do nome de cada nó, a 0,35 ms cada, e não a busca.
+
+### Os três padrões, e por que estes números
+
+**`profundidade_maxima = 10`** — é decisão de produto, não de custo. A distância mediana dentro do maior componente é de **20 saltos**, com p95 de 32 e máximo observado de 57. A mediana foi recusada porque um caminho de 20 saltos atravessa dez empresas intermediárias, e chamar aquilo de vínculo societário afirma mais do que o dado sustenta. A assimetria dos erros fecha a escolha: errar para baixo devolve `alem_do_limite` **com a distância real** — "há caminho, com 22 saltos" —, que é informação verdadeira; errar para cima entregaria trinta saltos com cara de descoberta, e essa perda não se desfaz, porque o leitor já leu.
+
+O limite governa **até onde o caminho é mostrado**, e não até onde a busca vai: ela corre até o fim com o orçamento de visitados como único freio.
+
+**`teto_de_nos = 1.000`** — é orçamento de **latência**, não de bytes. Uma resposta de 3.729 nós ocupa 628 KB, que é tranquilo, e custa 1,4 s. A bola tem dois regimes separados por três ordens de grandeza: de uma empresa aleatória, a mediana a 2 saltos é de **3 nós**; de um dos maiores hubs, o primeiro salto já tem **1.132**. Nenhum valor serve aos dois, e o padrão não tenta: 28 de 30 empresas de grau alto têm um nível recusado, e a resposta diz em `nivel_recusado` de que tamanho ele era. **Falha rápida com informação vence acerto lento.**
+
+**`saltos = 2`** — empresa, sócio, e as outras empresas do sócio. É a unidade que significa alguma coisa, e o primeiro valor em que o subgrafo induzido pode mostrar **ciclo** — que é o achado que uma árvore de busca esconderia.
+
+### Limite de taxa
+
+**60 requisições por minuto por cliente.** O propósito escolheu o número: o limite é contra varredura, não contra pico de visitante — se o link circular e cinquenta pessoas clicarem, travá-las mata a demonstração. A 60 por minuto, varrer os 19.770.618 CNPJs do recorte leva **229 dias** ininterruptos, enquanto um por segundo sustentado está acima do que uma pessoa navegando alcança.
+
+Quem quer o recorte inteiro não deveria varrer: o artefato é publicado em Release e traz mais do que a rota devolve. O `429` diz isso, com `Retry-After` junto.
+
 ## Arquitetura
 
 ```
@@ -178,21 +243,24 @@ Receita Federal (ZIP/CSV)
    [ busca ]     caminho societário, vizinhança de k saltos, métricas     ✔ pronto
         │
         ▼
-   [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap        Fase 6
+   [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap        ✔ pronto
+        │
+        ▼
+   [ web ]       página de consulta e desenho do subgrafo                 Fase 7
 ```
 
 As decisões estão registradas hoje nos módulos que as implementam e nas mensagens de commit, que explicam o porquê de cada uma. Os ADRs formais, em `docs/adr/`, são escritos na Fase 8 — inclusive o da recusa de usar o CPF sem máscara, com o custo medido.
 
 ## Stack
 
-Em uso: `Python` · `DuckDB` · `Parquet` · `NumPy/SciPy` · `GitHub Actions`
-Previsto: `FastAPI` (Fase 6) · `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
+Em uso: `Python` · `DuckDB` · `Parquet` · `NumPy/SciPy` · `FastAPI` · `GitHub Actions`
+Previsto: `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
 
 ---
 
 ## Reprodução
 
-Aquisição, bronze, silver, grafo e busca já funcionam ponta a ponta. A API chega na Fase 6.
+Aquisição, bronze, silver, grafo, busca e API já funcionam ponta a ponta. A página web chega na Fase 7.
 
 ```bash
 pip install -e ".[dev]"

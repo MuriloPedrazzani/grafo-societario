@@ -38,3 +38,4 @@ repos:
           - scipy-stubs>=1.14
           - types-psutil>=6.0
           - hypothesis>=6.100
+          - fastapi>=0.115

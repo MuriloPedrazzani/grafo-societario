@@ -39,6 +39,7 @@ from typing import Final
 import psutil
 
 from grafo_societario.config import Config
+from grafo_societario.graph.artefatos import ARTEFATOS_PUBLICAVEIS
 from grafo_societario.graph.build import gerar_arestas, gerar_nos, serializar_csr
 from grafo_societario.graph.components import calcular_componentes
 
@@ -54,16 +55,6 @@ está medindo. O commit 21 roda em 6 s: são cento e vinte amostras.
 
 MIB: Final = 1024 * 1024
 
-ARTEFATOS_PUBLICAVEIS: Final = (
-    "nos.parquet",
-    "existencia.npy",
-    "indptr.npy",
-    "indices.npy",
-    "qualificacoes.npy",
-    "componentes.npy",
-)
-"""O que vai para GitHub Release e para a imagem. `arestas.parquet` não entra:
-ele é insumo do CSR e não é consultado em tempo de resposta."""
 
 TETO_DE_DEPLOY: Final = 500_000_000
 """500 MB, em bytes decimais — a unidade em que o limite de free tier é anunciado."""
