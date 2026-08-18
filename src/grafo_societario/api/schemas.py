@@ -32,6 +32,19 @@ O campo booleano tira a decisão do consumidor. Junto vai `explicacao`, em
 português, porque a interface da Fase 7 precisa de uma frase e inventá-la seria
 inventar a semântica de novo, do lado de fora.
 
+## O nome do campo é a última chance de a ressalva chegar
+
+`vinculos_no_recorte` não se chama `grau`, e a diferença não é de estilo. Só
+foram ingeridos sócios de empresas cuja matriz está na UF alvo, então o número é
+**piso e nunca total**: quem participa de 3 empresas em SP e 40 no Rio aparece
+com 3.
+
+A coluna nasceu com esse nome no commit 19, o README tem uma seção sobre isso, e
+a distinção atravessou três fases. `"grau": 3` num JSON se lê como "tem 3
+sócios", que é falso — e a serialização seria o último metro, onde ninguém mais
+teria como corrigir. Vale igual para tamanho de componente: é componente
+**dentro do recorte**, e o nome do campo diz isso.
+
 ## `sem_vinculo` não pode virar `componentes_diferentes`
 
 Os dois afirmam ausência, e por isso a tentação de fundi-los. Mas
@@ -93,9 +106,11 @@ class NoDaResposta(BaseModel):
         "empresa de outra UF que aparece por ser sócia de uma daqui, e cujos demais vínculos "
         "não foram ingeridos."
     )
-    grau: int = Field(
-        description="Vínculos deste nó **dentro do recorte**. É piso, nunca total: quem "
-        "participa de 3 empresas em SP e 40 no Rio aparece aqui com 3."
+    vinculos_no_recorte: int = Field(
+        description="Vínculos deste nó **dentro do recorte**. É **piso, nunca total**: só foram "
+        "ingeridos sócios de empresas cuja matriz está na UF alvo, então quem participa de 3 "
+        "empresas em SP e 40 no Rio aparece aqui com 3. O campo não se chama `grau` de "
+        "propósito — `grau` se lê como número absoluto, e este não é."
     )
 
 

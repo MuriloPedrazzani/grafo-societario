@@ -262,7 +262,7 @@ def _no_da_resposta(acervo: Acervo, indice: int) -> NoDaResposta:
         regiao_fiscal=acervo.catalogo.regiao_de(indice),
         confianca=acervo.catalogo.confianca_de(indice),
         no_recorte=acervo.catalogo.no_recorte_de(indice),
-        grau=acervo.grafo.grau(indice),
+        vinculos_no_recorte=acervo.grafo.grau(indice),
     )
 
 

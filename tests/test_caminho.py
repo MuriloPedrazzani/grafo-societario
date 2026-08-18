@@ -151,6 +151,33 @@ def test_a_pessoa_fisica_do_caminho_nao_traz_nome(cliente: Any) -> None:
     assert meio["cnpj"] is None
 
 
+def test_o_no_declara_vinculos_no_recorte_e_nao_grau(cliente: Any) -> None:
+    """O nome do campo é a última chance de a ressalva chegar ao leitor.
+
+    O commit 19 nomeou a coluna `vinculos_no_recorte`, e não `grau`, de propósito,
+    e o README tem uma seção sobre isso. Um JSON com `"grau": 2` se lê como "tem
+    2 sócios" — e o número é 2 **dentro do recorte da UF alvo**. Quem participa de
+    3 empresas em SP e 40 no Rio aparece com 3.
+
+    Carregar essa distinção por três fases e perdê-la na serialização seria
+    desfazer o cuidado no último metro.
+    """
+    no = consultar(cliente, ALFA, BRAVO).json()["caminho"][0]
+
+    assert "grau" not in no
+    assert no["vinculos_no_recorte"] == 2
+
+
+def test_a_descricao_do_campo_diz_que_o_numero_e_piso(cliente: Any) -> None:
+    """A ressalva vive na documentação da rota, e não só no nome do campo."""
+    esquema = cliente.get("/openapi.json").json()["components"]["schemas"]["NoDaResposta"]
+
+    descricao = esquema["properties"]["vinculos_no_recorte"]["description"]
+
+    assert "piso" in descricao
+    assert "recorte" in descricao
+
+
 def test_devolve_o_cnpj_completo_das_empresas(cliente: Any) -> None:
     pontas = consultar(cliente, ALFA, BRAVO).json()["caminho"]
 
