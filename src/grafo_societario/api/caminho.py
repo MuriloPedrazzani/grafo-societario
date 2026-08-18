@@ -1,33 +1,8 @@
-"""O endpoint de caminho societário, e a ordem em que ele decide.
+"""O endpoint de caminho societário, e o que o limite pedido governa.
 
-## A ordem de checagem é a resposta, não um detalhe de implementação
-
-Dois artefatos respondem perguntas diferentes, e a ordem em que são consultados
-determina o que a API afirma:
-
-1. **catálogo** — a empresa é nó do grafo? Sim → travessia, com os quatro
-   desfechos da Fase 5.
-2. **`existencia.npy`** — não é nó, mas está no recorte? → `sem_vinculo`. Ela
-   existe e não tem vínculo nenhum, que é o caso de 74,8% do recorte.
-3. **nenhum dos dois** → `404`. Não há o que dizer sobre esta empresa.
-
-**O `404` é "não conheço", e não "fora do recorte".** A diferença tem 36.810
-casos: o **conector** é pessoa jurídica de outra UF que entrou no grafo por ser
-sócia de uma empresa daqui. Ele é nó, tem arestas, e **aparece dentro dos
-caminhos que esta rota devolve** — recusá-lo na entrada faria a API emitir um
-CNPJ numa resposta e rejeitar o mesmo CNPJ na requisição seguinte. Quem segue um
-caminho salto a salto bateria nisso no primeiro conector.
-
-Por isso a checagem de nó vem antes da de recorte, e não depois. O nó do conector
-responde com `no_recorte: false`, que é o aviso de que o grau dele é piso: só
-foram ingeridos os vínculos com empresas do recorte.
-
-**O `404` vence o `sem_vinculo`, inclusive no caso misto.** Consultar uma empresa
-sem vínculo contra uma desconhecida responde `404`, nos dois sentidos. O motivo é
-que `sem_vinculo` significa "a empresa **existe** e não tem vínculo": emiti-lo
-sobre esse par afirmaria de lado a existência da outra ponta, num campo que
-ninguém lê como afirmação. O erro de digitação que produz um CNPJ de verificador
-válido receberia "não têm vínculo" em vez de "não encontrei essa empresa".
+A ordem de checagem — nó, depois recorte, depois `404` — mora em
+`api.resolucao`, junto do motivo de ela ser essa. As três rotas de consulta
+dependem de responderem o mesmo sobre a mesma empresa.
 
 ## O limite é até onde o caminho é mostrado, não até onde a busca vai
 
@@ -94,10 +69,11 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Final, assert_never
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
-from grafo_societario.api.cnpj import Cnpj, CnpjInvalidoError, analisar, formatar
-from grafo_societario.api.deps import Acervo, AcervoDep
+from grafo_societario.api.cnpj import Cnpj
+from grafo_societario.api.deps import AcervoDep
+from grafo_societario.api.resolucao import analisar_ou_422, no_da_resposta, resolver
 from grafo_societario.api.schemas import DesfechoDaConsulta, NoDaResposta, RespostaDeCaminho
 from grafo_societario.graph.traversal import Desfecho, buscar_caminho
 
@@ -246,33 +222,6 @@ def _da_travessia(desfecho: Desfecho) -> DesfechoDaConsulta:
             assert_never(nao_tratado)
 
 
-def _no_da_resposta(acervo: Acervo, indice: int) -> NoDaResposta:
-    """Um nó do catálogo na forma que a resposta mostra.
-
-    O índice denso **não sai daqui**: ele é atribuído pela ordem do identificador
-    e o conjunto de nós muda a cada competência, então uma resposta que o
-    carregasse convidaria a rota `/no/12345`, que funcionaria hoje e devolveria
-    outra empresa no mês seguinte, sem erro e com aparência de acerto.
-    """
-    cnpj_basico = acervo.catalogo.cnpj_basico_de(indice)
-    return NoDaResposta(
-        tipo=acervo.catalogo.tipo_de(indice),
-        nome=acervo.catalogo.nome_de(indice),
-        cnpj=None if cnpj_basico is None else formatar(int(cnpj_basico)),
-        regiao_fiscal=acervo.catalogo.regiao_de(indice),
-        confianca=acervo.catalogo.confianca_de(indice),
-        no_recorte=acervo.catalogo.no_recorte_de(indice),
-        vinculos_no_recorte=acervo.grafo.grau(indice),
-    )
-
-
-def _analisar_ou_422(texto: str, campo: str) -> Cnpj:
-    try:
-        return analisar(texto)
-    except CnpjInvalidoError as erro:
-        raise HTTPException(status_code=422, detail=f"{campo}: {erro}") from erro
-
-
 @roteador.get(
     "/caminho",
     summary="Caminho societário entre duas empresas",
@@ -294,37 +243,21 @@ def caminho(
 
     `404` fica reservado a CNPJ ausente do recorte, e `422` a CNPJ malformado.
     """
-    cnpj_de = _analisar_ou_422(de, "de")
-    cnpj_para = _analisar_ou_422(para, "para")
+    cnpj_de = analisar_ou_422(de, "de")
+    cnpj_para = analisar_ou_422(para, "para")
+    ponta_de, ponta_para = resolver(acervo, cnpj_de, cnpj_para)
 
-    # A checagem de nó vem primeiro: o conector de outra UF é nó do grafo e não
-    # está no recorte, e perguntar pelo recorte antes o expulsaria de uma rota que
-    # devolve o CNPJ dele dentro dos caminhos.
-    indice_de = acervo.catalogo.indice_de(cnpj_de.cnpj_basico)
-    indice_para = acervo.catalogo.indice_de(cnpj_para.cnpj_basico)
-
-    desconhecidos = [
-        cnpj.completo
-        for cnpj, indice in ((cnpj_de, indice_de), (cnpj_para, indice_para))
-        if indice is None and not acervo.existe_no_recorte(cnpj.cnpj_basico)
-    ]
-    if desconhecidos:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Nesta competência não há empresa com este CNPJ: {', '.join(desconhecidos)}. "
-                f"O grafo cobre as empresas cuja matriz está em {acervo.config.uf_alvo}, mais as "
-                "de outras UFs que aparecem como sócias delas."
-            ),
-        )
-
-    if indice_de is None or indice_para is None:
+    if ponta_de.indice is None or ponta_para.indice is None:
         return _montar(cnpj_de, cnpj_para, DesfechoDaConsulta.SEM_VINCULO, profundidade_maxima)
 
     # A busca vai até o fim, com o orçamento como único freio. O limite pedido
     # decide o que é **mostrado**, e é aplicado depois — ver o topo do módulo.
     achado = buscar_caminho(
-        acervo.grafo, acervo.componentes, indice_de, indice_para, SEM_LIMITE_DE_PROFUNDIDADE
+        acervo.grafo,
+        acervo.componentes,
+        ponta_de.indice,
+        ponta_para.indice,
+        SEM_LIMITE_DE_PROFUNDIDADE,
     )
     desfecho = _da_travessia(achado.desfecho)
     distancia = achado.saltos if achado.encontrado else None
@@ -338,7 +271,7 @@ def caminho(
         desfecho,
         profundidade_maxima,
         distancia=distancia,
-        caminho=[_no_da_resposta(acervo, indice) for indice in achado.nos] if mostrar else [],
+        caminho=[no_da_resposta(acervo, indice) for indice in achado.nos] if mostrar else [],
         visitados=achado.visitados,
     )
 
