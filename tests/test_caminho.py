@@ -178,6 +178,17 @@ def test_a_descricao_do_campo_diz_que_o_numero_e_piso(cliente: Any) -> None:
     assert "recorte" in descricao
 
 
+def test_a_taxa_de_colisao_viaja_com_o_no_de_pessoa_fisica(cliente: Any) -> None:
+    """E é nula em quem não é fundido por máscara, com `confianca` dizendo o motivo."""
+    caminho = consultar(cliente, ALFA, BRAVO).json()["caminho"]
+    pessoa, empresa = caminho[1], caminho[0]
+
+    assert pessoa["confianca"] == "estimada"
+    assert isinstance(pessoa["taxa_de_colisao"], float)
+    assert empresa["confianca"] == "exata"
+    assert empresa["taxa_de_colisao"] is None
+
+
 def test_devolve_o_cnpj_completo_das_empresas(cliente: Any) -> None:
     pontas = consultar(cliente, ALFA, BRAVO).json()["caminho"]
 

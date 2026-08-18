@@ -22,6 +22,7 @@ ARTEFATOS_PUBLICAVEIS: Final = (
     "no_por_cnpj.npy",
     "atributos.npy",
     "regiao_fiscal.npy",
+    "taxa_por_regiao.npy",
     "nome_offsets.npy",
     "bloco_inicio.npy",
     "bloco_byte.npy",

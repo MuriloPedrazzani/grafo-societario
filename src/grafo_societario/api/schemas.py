@@ -101,6 +101,16 @@ class NoDaResposta(BaseModel):
         "documento nenhum, e cuja fusão é materialmente mais frágil — e `nao_fundivel` para "
         "sócio sem nome."
     )
+    taxa_de_colisao: float | None = Field(
+        description="Probabilidade de esta identidade ser **duas pessoas diferentes fundidas**. "
+        "A máscara do CPF deixa seis dígitos visíveis, então dois homônimos colidem se "
+        "compartilharem os seis — e o último deles é a região fiscal, que num recorte de SP é "
+        "`8` em 86,65% dos casos. Por isso a taxa é medida por região, e não estimada de boca. "
+        "**Nula sempre que `confianca` não é `estimada`, e aí o próprio `confianca` diz o "
+        "motivo**: identidade exata não é fundida, estrangeiro não tem documento, e sócio sem "
+        "nome não é fundido com ninguém. Nulo é a grandeza não se aplicar, e não dado faltando "
+        "— zero afirmaria colisão impossível."
+    )
     no_recorte: bool | None = Field(
         description="Se a empresa tem matriz na UF do recorte. Falso identifica o **conector**: "
         "empresa de outra UF que aparece por ser sócia de uma daqui, e cujos demais vínculos "

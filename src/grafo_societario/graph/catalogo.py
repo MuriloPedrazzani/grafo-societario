@@ -44,6 +44,7 @@ amostra.
 from __future__ import annotations
 
 import logging
+import math
 import zlib
 from dataclasses import dataclass
 from typing import Any, Final, Literal
@@ -64,8 +65,19 @@ Reordenar aqui reinterpreta todo artefato já gravado, sem nada falhar. Acrescen
 no fim é seguro; mexer no meio, não.
 """
 
+ESTIMADA: Final = "estimada"
+"""A única confiança que tem taxa de colisão. Ver `Catalogo.taxa_de_colisao_de`."""
+
 SEM_REGIAO: Final = -1
 """Região fiscal de quem não tem CPF. `0` é dígito válido e não serve de ausência."""
+
+REGIOES: Final = 10
+"""Dígitos de região fiscal, de 0 a 9.
+
+A tabela de taxas tem uma posição por dígito e **a posição é o dígito** — não a
+ordem de aparição. São oitenta bytes; comprimi-la para os dígitos presentes
+economizaria nada e faria a região 0 virar a região 1 no mês em que um dígito
+não aparecesse."""
 
 
 def procurar(
@@ -91,6 +103,7 @@ ARQUIVOS: Final = (
     "no_por_cnpj.npy",
     "atributos.npy",
     "regiao_fiscal.npy",
+    "taxa_por_regiao.npy",
     "nome_offsets.npy",
     "bloco_inicio.npy",
     "bloco_byte.npy",
@@ -141,6 +154,13 @@ class Catalogo:
     no_por_cnpj: np.ndarray[Any, np.dtype[np.int32]]
     atributos: np.ndarray[Any, np.dtype[np.int8]]
     regiao_fiscal: np.ndarray[Any, np.dtype[np.int8]]
+    taxa_por_regiao: np.ndarray[Any, np.dtype[np.float64]]
+    """Dez valores, um por dígito de região. `NaN` onde não há pessoa física.
+
+    **Derivado, não por nó.** A taxa é calculada por região na camada de
+    identidade, então um array por nó guardaria 5,6 milhões de cópias de dez
+    números — 45 MB para dizer dez coisas."""
+
     nome_offsets: np.ndarray[Any, np.dtype[np.int32]]
     bloco_inicio: np.ndarray[Any, np.dtype[np.int32]]
     bloco_byte: np.ndarray[Any, np.dtype[np.int64]]
@@ -230,6 +250,32 @@ class Catalogo:
         digito = int(self.regiao_fiscal[indice])
         return None if digito == SEM_REGIAO else str(digito)
 
+    def taxa_de_colisao_de(self, indice: int) -> float | None:
+        """Probabilidade de esta identidade ser duas pessoas, ou `None`.
+
+        **Nulo não é dado faltando: é a grandeza não se aplicar.** A taxa mede
+        fusão por máscara de CPF, e só pessoa física é fundida assim. Pessoa
+        jurídica é identificada exatamente pelo CNPJ; estrangeiro não tem
+        documento nenhum; e sócio **sem nome** é `nao_fundivel` — cada registro
+        dele vira um nó próprio, e não há fusão a medir. Este último é o caso
+        traiçoeiro: ele **tem** região fiscal, e derivar a taxa só da região
+        daria um número aos 370 nós em que ela não significa nada.
+
+        Zero seria pior que nulo nos três: afirmaria colisão impossível.
+
+        O valor é o mesmo para toda identidade da mesma região, porque é assim
+        que ele é calculado — daí a tabela de dez posições em vez de um array por
+        nó.
+        """
+        self._validar(indice)
+        if self.confianca_de(indice) != ESTIMADA:
+            return None
+        digito = int(self.regiao_fiscal[indice])
+        if digito == SEM_REGIAO:
+            return None
+        valor = float(self.taxa_por_regiao[digito])
+        return None if math.isnan(valor) else valor
+
 
 def abrir_catalogo(config: Config, competencia: str | None = None) -> Catalogo:
     """Mapeia o catálogo e confere que os arrays descrevem o mesmo conjunto.
@@ -274,6 +320,7 @@ def abrir_catalogo(config: Config, competencia: str | None = None) -> Catalogo:
         no_por_cnpj=no_por_cnpj,
         atributos=mapear("atributos.npy"),
         regiao_fiscal=mapear("regiao_fiscal.npy"),
+        taxa_por_regiao=mapear("taxa_por_regiao.npy"),
         nome_offsets=mapear("nome_offsets.npy"),
         bloco_inicio=mapear("bloco_inicio.npy"),
         bloco_byte=mapear("bloco_byte.npy"),
@@ -299,6 +346,12 @@ def _conferir(catalogo: Catalogo) -> None:
         raise ArtefatosIncompativeisError(
             f"atributos tem {catalogo.nos:,} nós e regiao_fiscal tem "
             f"{catalogo.regiao_fiscal.size:,}."
+        )
+    if catalogo.taxa_por_regiao.size != REGIOES:
+        raise ArtefatosIncompativeisError(
+            f"taxa_por_regiao tem {catalogo.taxa_por_regiao.size} posições e precisa de "
+            f"{REGIOES}, uma por dígito de região fiscal. A posição é o dígito, e uma tabela "
+            "mais curta faria a região 0 ser lida na posição de outra."
         )
     if catalogo.nome_offsets.size != catalogo.nos + 1:
         raise ArtefatosIncompativeisError(

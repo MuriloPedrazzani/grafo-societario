@@ -43,7 +43,7 @@ from typing import Any, Final
 import numpy as np
 
 from grafo_societario.config import Config
-from grafo_societario.graph.catalogo import CONFIANCAS, SEM_REGIAO, TIPOS
+from grafo_societario.graph.catalogo import CONFIANCAS, ESTIMADA, REGIOES, SEM_REGIAO, TIPOS
 from grafo_societario.transform.bronze import abrir_conexao
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,10 @@ class NomeDivergenteError(ErroDeMetadados):
     """Um nome lido de volta não é o que foi gravado."""
 
 
+class TaxaDivergenteError(ErroDeMetadados):
+    """A taxa derivada da região não reproduz a que a camada de identidade calculou."""
+
+
 @dataclass(frozen=True)
 class Metadados:
     """O que a conversão produziu."""
@@ -102,6 +106,64 @@ def _empacotar(tipo: str, confianca: str, no_recorte: bool | None) -> int:
     """
     marca = 0 if no_recorte is None else (2 if no_recorte else 1)
     return TIPOS.index(tipo) | (CONFIANCAS.index(confianca) << 2) | (marca << 4)
+
+
+def _tabela_de_taxas(
+    regioes: np.ndarray[Any, np.dtype[np.int8]], taxas: np.ndarray[Any, np.dtype[np.float64]]
+) -> np.ndarray[Any, np.dtype[np.float64]]:
+    """Os dez valores de taxa de colisão, **indexados pelo dígito da região**.
+
+    A posição *é* o dígito, e não a ordem de aparição. Guardar só os dígitos
+    presentes economizaria bytes que não existem — são oitenta — e faria a região
+    0 virar a região 1 no primeiro mês em que um dígito não aparecesse, sem nada
+    falhar.
+
+    Levanta se algum dígito tiver mais de uma taxa: **a derivação inteira depende
+    de a taxa ser função da região**, e isso é conferido aqui, não suposto.
+    """
+    tabela = np.full(REGIOES, np.nan, dtype=np.float64)
+    conhecidas = ~np.isnan(taxas)
+    for digito in range(REGIOES):
+        candidatas = np.unique(taxas[conhecidas & (regioes == digito)])
+        if candidatas.size > 1:
+            raise TaxaDivergenteError(
+                f"A região {digito} tem {candidatas.size} taxas distintas: "
+                f"{', '.join(f'{c:.6g}' for c in candidatas[:5])}. A taxa é calculada por região "
+                "na camada de identidade, e derivá-la da região só é válido enquanto ela for "
+                "função dela."
+            )
+        if candidatas.size == 1:
+            tabela[digito] = candidatas[0]
+    return tabela
+
+
+def _conferir_taxa(
+    tabela: np.ndarray[Any, np.dtype[np.float64]],
+    regioes: np.ndarray[Any, np.dtype[np.int8]],
+    aplica: np.ndarray[Any, np.dtype[np.bool_]],
+    esperado: np.ndarray[Any, np.dtype[np.float64]],
+) -> None:
+    """Reproduz a taxa de **cada** nó a partir dos dez valores e exige igualdade.
+
+    Não é amostra: são os 5,6 milhões de nós de pessoa física, e a comparação é
+    vetorizada, então custa uma passagem numa etapa que roda uma vez. É o que
+    separa uma derivação **fiel** de uma derivação plausível — e plausível é
+    exatamente o que passa despercebido, porque a contagem de nós não muda.
+
+    `aplica` é o mesmo predicado que o catálogo usa para decidir se há taxa
+    (`confianca == estimada`), de propósito: uma guarda que confere uma regra
+    diferente da que o leitor executa não confere nada.
+    """
+    derivado = np.where(aplica & (regioes >= 0), tabela[np.maximum(regioes, 0)], np.nan)
+    fiel = (np.isnan(derivado) & np.isnan(esperado)) | (derivado == esperado)
+    if not bool(fiel.all()):
+        divergentes = int((~fiel).sum())
+        primeiro = int(np.argmax(~fiel))
+        raise TaxaDivergenteError(
+            f"{divergentes:,} nós têm taxa diferente da que a região deriva. O primeiro é o nó "
+            f"{primeiro:,}: região {int(regioes[primeiro])}, gravado {esperado[primeiro]!r}, "
+            f"derivado {derivado[primeiro]!r}. A tabela por região não descreve este artefato."
+        )
 
 
 def _blocos_de_nomes(
@@ -163,22 +225,36 @@ def serializar_metadados(config: Config, competencia: str | None = None) -> Meta
             "ORDER BY file_row_number"
         )
         colunas = conexao.execute(
-            f"SELECT tipo, confianca, no_recorte, regiao_fiscal, cnpj_basico FROM {fonte}"
+            "SELECT tipo, confianca, no_recorte, regiao_fiscal, cnpj_basico, taxa_de_colisao "
+            f"FROM {fonte}"
         ).fetchall()
 
         atributos = np.fromiter(
-            (_empacotar(str(t), str(c), r) for t, c, r, _, _ in colunas),
+            (_empacotar(str(t), str(c), r) for t, c, r, _, _, _ in colunas),
             dtype=np.int8,
             count=len(colunas),
         )
         regiao = np.fromiter(
-            (SEM_REGIAO if d is None else int(d) for _, _, _, d, _ in colunas),
+            (SEM_REGIAO if d is None else int(d) for _, _, _, d, _, _ in colunas),
             dtype=np.int8,
             count=len(colunas),
         )
+        # A taxa vem por nó no artefato interno e sai por região no publicável.
+        # `aplica` é o predicado do catálogo, não uma reescrita dele.
+        taxa_por_no = np.fromiter(
+            (np.nan if x is None else float(x) for *_, x in colunas),
+            dtype=np.float64,
+            count=len(colunas),
+        )
+        aplica = np.fromiter(
+            (c == ESTIMADA for _, c, *_ in colunas), dtype=bool, count=len(colunas)
+        )
+        taxa_por_regiao = _tabela_de_taxas(regiao, taxa_por_no)
+        _conferir_taxa(taxa_por_regiao, regiao, aplica, taxa_por_no)
+
         empresas = [
             (int(cnpj), posicao)
-            for posicao, (_, _, _, _, cnpj) in enumerate(colunas)
+            for posicao, (_, _, _, _, cnpj, _) in enumerate(colunas)
             if cnpj is not None
         ]
         empresas.sort()
@@ -204,6 +280,7 @@ def serializar_metadados(config: Config, competencia: str | None = None) -> Meta
         "no_por_cnpj.npy": no_por_cnpj,
         "atributos.npy": atributos,
         "regiao_fiscal.npy": regiao,
+        "taxa_por_regiao.npy": taxa_por_regiao,
         "nome_offsets.npy": offsets,
         "bloco_inicio.npy": bloco_inicio,
         "bloco_byte.npy": bloco_byte,

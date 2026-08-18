@@ -30,7 +30,10 @@ from grafo_societario.graph.metadados import (
     BLOCO,
     NomeDivergenteError,
     NosAusentesError,
+    TaxaDivergenteError,
     _conferir_ida_e_volta,
+    _conferir_taxa,
+    _tabela_de_taxas,
     serializar_metadados,
 )
 from grafo_societario.transform.identity import gerar_identidades
@@ -85,6 +88,177 @@ def construido(tmp_path: Path) -> Config:
     gerar_nos(config)
     serializar_metadados(config)
     return config
+
+
+BASES_POR_REGIAO = tuple(f"9000000{digito}" for digito in range(10))
+"""Uma empresa por dígito de região fiscal."""
+
+SEM_NOME = "90000010"
+DE_FORA = "90000011"
+
+
+@pytest.fixture
+def todas_as_regioes(tmp_path: Path) -> Config:
+    """Um nó de pessoa física por dígito de região, mais os dois que não têm taxa.
+
+    A máscara do CPF é `***DDDDDD**`, e a **nona posição** é o dígito da região —
+    o último dos seis visíveis. Variar só ele produz os dez regimes.
+    """
+    config = Config(competencia="2026-06", data_dir=tmp_path, uf_alvo="SP")
+    bases = [*BASES_POR_REGIAO, SEM_NOME, DE_FORA]
+    gravar_estabelecimentos(config, [estabelecimento(cnpj) for cnpj in bases])
+    aplicar_recorte_por_uf(config)
+    gravar_empresas(config, [empresa(cnpj, razao_social=f"EMPRESA {cnpj}") for cnpj in bases])
+    _gravar_dominio(config, "Naturezas", NATUREZAS_PADRAO)
+    _gravar_dominio(config, "Qualificacoes", QUALIFICACOES_PADRAO)
+    _gravar_dominio(config, "Paises", PAISES_PADRAO)
+    tipar_empresas(config)
+    gravar_socios(
+        config,
+        [
+            *(
+                socio(base, nome=f"PESSOA NUMERO {digito}", documento=f"***12345{digito}**")
+                for digito, base in enumerate(BASES_POR_REGIAO)
+            ),
+            # Sócio sem nome: tem região e é `nao_fundivel`, então não tem taxa.
+            socio(SEM_NOME, nome="", documento="***123456**"),
+            # Estrangeiro: não tem documento nenhum, logo nem região nem taxa.
+            socio(DE_FORA, tipo="3", nome="ECHO FOXTROT", documento="", pais="249"),
+        ],
+    )
+    tipar_socios(config)
+    gerar_identidades(config)
+    gerar_nos(config)
+    serializar_metadados(config)
+    return config
+
+
+def _gravar_tabela(config: Config, tabela: np.ndarray[Any, np.dtype[Any]]) -> None:
+    alvo = config.data_dir / "grafo" / "2026-06" / "taxa_por_regiao.npy"
+    with alvo.open("wb") as arquivo:
+        np.save(arquivo, tabela, allow_pickle=False)
+
+
+# ------------------------------------------------- taxa de colisão por região
+
+
+def test_a_taxa_e_indexada_pelo_digito_e_nao_pela_posicao(todas_as_regioes: Config) -> None:
+    """A correspondência dígito → posição, conferida nos dez.
+
+    O risco aqui é menor que o de array paralelo por nó — são dez posições —, mas
+    não é zero: quem "otimizar" para guardar só os dígitos presentes faz a região
+    0 virar a região 1 no primeiro mês em que um dígito não aparecer, e nada
+    falha. A tabela gravada tem um valor que **denuncia o dígito de onde veio**.
+    """
+    _gravar_tabela(todas_as_regioes, np.array([d / 1000 for d in range(10)], dtype=np.float64))
+    cat = abrir_catalogo(todas_as_regioes)
+
+    vistos = {
+        cat.regiao_de(no): cat.taxa_de_colisao_de(no)
+        for no in range(cat.nos)
+        if cat.confianca_de(no) == "estimada"
+    }
+
+    assert len(vistos) == 10, "a fixture precisa cobrir os dez dígitos"
+    for digito, taxa in vistos.items():
+        assert digito is not None
+        assert taxa == int(digito) / 1000, f"o dígito {digito} leu a posição errada"
+
+
+def test_pessoa_fisica_sem_nome_tem_regiao_e_nao_tem_taxa(todas_as_regioes: Config) -> None:
+    """`nao_fundivel` não é dado faltando: a grandeza não se aplica.
+
+    Taxa de colisão mede fusão por máscara de CPF, e sócio sem nome não é fundido
+    por máscara nenhuma — cada registro dele vira um nó próprio. No dado real são
+    **370 nós que têm região e não têm taxa**, e derivar a taxa só da região daria
+    um número a todos eles.
+    """
+    cat = abrir_catalogo(todas_as_regioes)
+
+    nao_fundiveis = [no for no in range(cat.nos) if cat.confianca_de(no) == "nao_fundivel"]
+
+    assert nao_fundiveis, "a fixture precisa de um sócio sem nome"
+    for no in nao_fundiveis:
+        assert cat.regiao_de(no) is not None, "ele tem região"
+        assert cat.taxa_de_colisao_de(no) is None, "e mesmo assim não tem taxa"
+
+
+@pytest.mark.parametrize("confianca", ["exata", "fraca"])
+def test_quem_nao_e_fundido_por_mascara_nao_tem_taxa(
+    todas_as_regioes: Config, confianca: str
+) -> None:
+    """Pessoa jurídica é identificada exatamente pelo CNPJ; estrangeiro não tem
+    documento nenhum. Nos dois a taxa não se aplica, e nula é a resposta certa."""
+    cat = abrir_catalogo(todas_as_regioes)
+
+    nos = [no for no in range(cat.nos) if cat.confianca_de(no) == confianca]
+
+    assert nos, f"a fixture precisa de um nó com confiança {confianca}"
+    assert all(cat.taxa_de_colisao_de(no) is None for no in nos)
+
+
+def test_digito_sem_taxa_na_tabela_devolve_nulo_e_nao_zero(todas_as_regioes: Config) -> None:
+    """Competência em que um dígito não tem pessoa física nenhuma.
+
+    Zero afirmaria colisão impossível, que é uma afirmação forte e falsa. Nulo
+    diz que não há número para aquele dígito.
+    """
+    tabela = np.full(10, np.nan, dtype=np.float64)
+    tabela[8] = 0.5
+    _gravar_tabela(todas_as_regioes, tabela)
+    cat = abrir_catalogo(todas_as_regioes)
+
+    por_regiao = {
+        cat.regiao_de(no): cat.taxa_de_colisao_de(no)
+        for no in range(cat.nos)
+        if cat.confianca_de(no) == "estimada"
+    }
+
+    assert por_regiao["8"] == 0.5
+    assert all(taxa is None for digito, taxa in por_regiao.items() if digito != "8")
+
+
+def test_a_tabela_precisa_ter_uma_posicao_por_digito(todas_as_regioes: Config) -> None:
+    _gravar_tabela(todas_as_regioes, np.zeros(9, dtype=np.float64))
+
+    with pytest.raises(ArtefatosIncompativeisError, match="dígito"):
+        abrir_catalogo(todas_as_regioes)
+
+
+def test_a_conferencia_da_derivacao_reprova_tabela_errada() -> None:
+    """A validação que nunca reprovou não provou que sabe reprovar.
+
+    A guarda roda na construção sobre os 5,6 milhões de nós de pessoa física, e
+    aqui ela é exercitada contra um caso construído para falhar — senão "passou"
+    não significaria nada.
+    """
+    tabela = np.array([0.5] + [np.nan] * 9, dtype=np.float64)
+    regioes = np.array([0, 0], dtype=np.int8)
+    aplica = np.array([True, True])
+    esperado = np.array([0.5, 0.25])  # o segundo nó discorda da tabela
+
+    with pytest.raises(TaxaDivergenteError, match="1"):
+        _conferir_taxa(tabela, regioes, aplica, esperado)
+
+
+def test_a_conferencia_da_derivacao_aprova_o_caso_fiel() -> None:
+    """Controle positivo: a guarda tem de deixar passar o que está certo."""
+    tabela = np.array([0.5] + [np.nan] * 9, dtype=np.float64)
+    regioes = np.array([0, 0, -1], dtype=np.int8)
+    aplica = np.array([True, True, False])
+    esperado = np.array([0.5, 0.5, np.nan])
+
+    _conferir_taxa(tabela, regioes, aplica, esperado)
+
+
+def test_a_tabela_recusa_regiao_com_duas_taxas() -> None:
+    """A derivação inteira depende de a taxa ser **função** da região. Isso é
+    conferido, e não suposto."""
+    regioes = np.array([3, 3], dtype=np.int8)
+    taxas = np.array([0.5, 0.25])
+
+    with pytest.raises(TaxaDivergenteError, match="região 3"):
+        _tabela_de_taxas(regioes, taxas)
 
 
 # ------------------------------------------------- ida e volta

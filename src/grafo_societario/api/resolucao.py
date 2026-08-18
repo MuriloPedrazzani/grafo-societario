@@ -121,6 +121,7 @@ def no_da_resposta(acervo: Acervo, indice: int) -> NoDaResposta:
         cnpj=None if cnpj_basico is None else formatar(int(cnpj_basico)),
         regiao_fiscal=acervo.catalogo.regiao_de(indice),
         confianca=acervo.catalogo.confianca_de(indice),
+        taxa_de_colisao=acervo.catalogo.taxa_de_colisao_de(indice),
         no_recorte=acervo.catalogo.no_recorte_de(indice),
         vinculos_no_recorte=acervo.grafo.grau(indice),
     )
