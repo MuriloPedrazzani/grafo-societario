@@ -29,6 +29,29 @@ sobre esse par afirmaria de lado a existência da outra ponta, num campo que
 ninguém lê como afirmação. O erro de digitação que produz um CNPJ de verificador
 válido receberia "não têm vínculo" em vez de "não encontrei essa empresa".
 
+## O limite é até onde o caminho é mostrado, não até onde a busca vai
+
+A busca é sempre chamada **sem limite de profundidade**, com o orçamento de
+visitados como único freio. `profundidade_maxima` é aplicado depois, sobre a
+distância encontrada, e decide apenas se o trajeto é exibido.
+
+Isso muda o que `alem_do_limite` significa. Antes ele dizia "não procurei até
+lá" — ignorância. Agora diz **"há caminho, com 22 saltos, mais que os 10
+pedidos"**: o vínculo existe, é remoto, e a distância é um achado verdadeiro. Com
+o padrão de 10, esse é o desfecho de 293 em cada 300 pares do maior componente, e
+seria muito pobre gastá-lo dizendo que não se sabe.
+
+É também exatamente o que o projeto vem afirmando com números: **grafo societário
+não é mundo pequeno**. A distância mediana é de 20 saltos, e cada resposta
+`alem_do_limite` passa a ser mais uma medição disso em vez de uma desistência.
+
+`orcamento_excedido` fica sendo o **único "não sei"** que resta.
+
+O custo está medido na tabela abaixo: a mediana da consulta vai de 0,27 ms para
+6,70 ms, e a resposta inteira de 1,39 ms para 8,01 ms. Os exemplos curados da
+demo não pagam nada — eles são caminhos curtos ou pares de componentes
+diferentes, e o rótulo de componente continua respondendo em 0,02 ms.
+
 ## Os cinco desfechos são exaustivos no tipo, e o mypy é quem cobra
 
 A conversão de `graph.traversal.Desfecho` para `DesfechoDaConsulta` é um `match`
@@ -47,27 +70,23 @@ Travessia mais catálogo mais serialização, contra o artefato real de 2026-06 
 
 | amostra | mediana | p95 | máximo |
 |---|---:|---:|---:|
-| exemplos curados da demo | **0,02 ms** | 0,92 ms | 1,29 ms |
-| 300 pares aleatórios do gigante, profundidade 10 | **0,27 ms** | 2,34 ms | 15,86 ms |
-| os mesmos, profundidade 40 | 10,48 ms | 40,21 ms | 74,48 ms |
-| os mesmos, profundidade 10, **pela pilha HTTP** | **1,39 ms** | 3,13 ms | 5,21 ms |
+| exemplos curados da demo | **0,02 ms** | 0,87 ms | 0,94 ms |
+| 300 pares aleatórios do gigante | **6,70 ms** | 37,69 ms | 72,44 ms |
+| os mesmos, **pela pilha HTTP** | **8,01 ms** | 39,74 ms | 74,03 ms |
 
-Duas leituras saem daí.
+O que a demo exercita custa **0,02 ms**, e é isso que o visitante sente: caminho
+curto responde pelo trajeto, par de componentes diferentes responde pelo rótulo
+sem percorrer nada.
 
-**No padrão, o framework custa mais que o grafo.** A consulta leva 0,27 ms e a
-resposta inteira leva 1,39 ms: os outros 1,1 ms são ASGI, roteamento e
-serialização HTTP. Otimizar a travessia a partir daqui não moveria o número que
-o usuário sente.
+Os 6,70 ms da mediana são o preço de ir até o fim para saber a distância, e a
+folga é larga: a busca toca **6.834 nós na mediana e 75.291 no máximo**, contra
+um orçamento de 250.000. O pior caso continua limitado por construção, e não por
+amostra.
 
-**O padrão de profundidade também é o barato, e não foi escolhido por isso.** De
-10 para 40 a mediana vai de 0,27 ms a 10,48 ms — quarenta vezes — porque a
-mediana de distância é 20 e a busca que para no nível 10 nem chega perto. O
-argumento do padrão é de significado, e está em `PROFUNDIDADE_PADRAO`; que o
-custo concorde é conveniência, não justificativa.
-
-Os desfechos daquela amostra confirmam a distribuição da Fase 5: com
-profundidade 10, **293 dos 300 pares respondem `alem_do_limite`**; com 40, 297
-respondem `encontrado`. É o formato deste grafo, e não uma falha da busca.
+Uma comparação que sobreviveu à mudança: o par de 4 saltos da demo custa 0,78 ms
+de consulta dentro de uma resposta HTTP de poucos milissegundos. **Para caminho
+curto, o framework ainda custa mais que o grafo** — o que muda o número do
+usuário não é otimizar a travessia.
 """
 
 from __future__ import annotations
@@ -109,10 +128,12 @@ coadministração pelo mesmo contador é aresta verdadeira e não é vínculo
 societário significativo. Aquilo foi decisão de modelagem dita em voz alta; esta
 é a mesma decisão, no padrão de um parâmetro.
 
-O custo de errar para baixo é **conhecido e barato**: 97,5% dos pares do gigante
-estão além de 10 saltos, e todos recebem `alem_do_limite`, que não afirma
-ausência e diz para aumentar o limite. Errar para cima entregaria caminho de 30
-saltos com cara de descoberta.
+**A assimetria dos erros é o que fecha a escolha.** Errar para baixo devolve
+`alem_do_limite`, que não afirma ausência e — desde que a busca deixou de parar
+no limite — vem **com a distância real**: "há caminho, com 22 saltos, mais que os
+10 pedidos". É informação verdadeira, e não uma desistência. Errar para cima
+entregaria trinta saltos com cara de descoberta, e essa perda não tem
+recuperação: o leitor já leu.
 
 A distribuição inteira vai na descrição do parâmetro, porque quem discordar
 precisa dos mesmos números para discordar — e discordar aqui custa um parâmetro
@@ -126,8 +147,10 @@ DESCRICAO_DA_PROFUNDIDADE: Final = (
     f"de **57** — e apenas 0,55% dos pares estão a até 6 saltos. O padrão é "
     f"{PROFUNDIDADE_PADRAO}, escolhido por significado e não por custo: além de uma dezena de "
     "saltos a cadeia atravessa cinco empresas intermediárias, e chamar aquilo de vínculo "
-    "societário afirma mais do que o dado sustenta. Pedir menos devolve `alem_do_limite`, que "
-    "**não afirma ausência de vínculo**. Para cobrir o p99, peça 40."
+    "societário afirma mais do que o dado sustenta. **Este limite decide até onde o caminho é "
+    "mostrado, e não até onde a busca procura**: quando a distância excede o pedido, a resposta "
+    "traz `alem_do_limite` com a distância real e sem o trajeto — o vínculo existe e é remoto. "
+    "Para ver o trajeto desses casos, peça 40, que cobre o p99."
 )
 
 DESCRICAO_DO_CNPJ: Final = (
@@ -135,6 +158,19 @@ DESCRICAO_DO_CNPJ: Final = (
     "aceito**: ele não tem verificador, e um erro de digitação viraria consulta silenciosa a "
     "outra empresa."
 )
+
+SEM_LIMITE_DE_PROFUNDIDADE: Final = 2**31 - 1
+"""A profundidade com que a busca é sempre chamada: nenhuma.
+
+`graph.traversal` exige o limite, e com razão — lá ele é obrigatório para que
+ninguém herde um número da intuição. Aqui a resposta é explícita: **não limite a
+busca**. Quem limita o custo é o orçamento de visitados, que é o papel dele desde
+o commit 29, e a medição mostra que sobra folga larga: mediana de 6.834 nós
+tocados e máximo de 75.291 sobre 300 pares do gigante, contra teto de 250.000.
+
+O valor é grande e não infinito porque o parâmetro é `int` e a comparação é
+`nivel_o + nivel_d + 1 > profundidade_maxima`. Nenhum caminho deste grafo chega
+perto: o máximo observado na Fase 5 foi 57 saltos."""
 
 roteador = APIRouter(tags=["consulta"])
 
@@ -144,7 +180,7 @@ def _saltos_por_extenso(saltos: int) -> str:
 
 
 def descrever(
-    desfecho: DesfechoDaConsulta, saltos: int | None, profundidade_maxima: int
+    desfecho: DesfechoDaConsulta, distancia: int | None, profundidade_maxima: int
 ) -> tuple[bool, str]:
     """Se o desfecho afirma ausência de vínculo, e a frase que o explica.
 
@@ -154,7 +190,7 @@ def descrever(
     """
     match desfecho:
         case DesfechoDaConsulta.ENCONTRADO:
-            quanto = "" if saltos is None else f", com {_saltos_por_extenso(saltos)}"
+            quanto = "" if distancia is None else f", com {_saltos_por_extenso(distancia)}"
             return False, f"Há caminho societário entre as duas empresas{quanto}."
         case DesfechoDaConsulta.SEM_VINCULO:
             return True, (
@@ -168,10 +204,18 @@ def descrever(
                 "ausência é definitiva, e não depende do limite de profundidade."
             )
         case DesfechoDaConsulta.ALEM_DO_LIMITE:
+            if distancia is None:
+                return False, (
+                    "Existe caminho entre as duas empresas e ele é mais longo que os "
+                    f"{_saltos_por_extenso(profundidade_maxima)} pedidos. **Isto não diz que "
+                    "elas não têm vínculo.**"
+                )
             return False, (
-                f"Existe caminho entre as duas empresas e ele é mais longo que os "
-                f"{_saltos_por_extenso(profundidade_maxima)} pedidos. **Isto não diz que elas "
-                "não têm vínculo** — aumente profundidade_maxima para procurar mais fundo."
+                f"Há caminho societário entre as duas empresas, com "
+                f"{_saltos_por_extenso(distancia)} — mais que os "
+                f"{_saltos_por_extenso(profundidade_maxima)} pedidos, e por isso o caminho não "
+                "é mostrado. **O vínculo existe e é remoto**; aumente profundidade_maxima para "
+                "ver o trajeto."
             )
         case DesfechoDaConsulta.ORCAMENTO_EXCEDIDO:
             return False, (
@@ -277,18 +321,25 @@ def caminho(
     if indice_de is None or indice_para is None:
         return _montar(cnpj_de, cnpj_para, DesfechoDaConsulta.SEM_VINCULO, profundidade_maxima)
 
-    encontrado = buscar_caminho(
-        acervo.grafo, acervo.componentes, indice_de, indice_para, profundidade_maxima
+    # A busca vai até o fim, com o orçamento como único freio. O limite pedido
+    # decide o que é **mostrado**, e é aplicado depois — ver o topo do módulo.
+    achado = buscar_caminho(
+        acervo.grafo, acervo.componentes, indice_de, indice_para, SEM_LIMITE_DE_PROFUNDIDADE
     )
-    desfecho = _da_travessia(encontrado.desfecho)
+    desfecho = _da_travessia(achado.desfecho)
+    distancia = achado.saltos if achado.encontrado else None
+    mostrar = achado.encontrado and achado.saltos <= profundidade_maxima
+    if achado.encontrado and not mostrar:
+        desfecho = DesfechoDaConsulta.ALEM_DO_LIMITE
+
     return _montar(
         cnpj_de,
         cnpj_para,
         desfecho,
         profundidade_maxima,
-        saltos=encontrado.saltos if encontrado.encontrado else None,
-        caminho=[_no_da_resposta(acervo, indice) for indice in encontrado.nos],
-        visitados=encontrado.visitados,
+        distancia=distancia,
+        caminho=[_no_da_resposta(acervo, indice) for indice in achado.nos] if mostrar else [],
+        visitados=achado.visitados,
     )
 
 
@@ -297,18 +348,18 @@ def _montar(
     para: Cnpj,
     desfecho: DesfechoDaConsulta,
     profundidade_maxima: int,
-    saltos: int | None = None,
+    distancia: int | None = None,
     caminho: list[NoDaResposta] | None = None,
     visitados: int = 0,
 ) -> RespostaDeCaminho:
-    afirma_ausencia, explicacao = descrever(desfecho, saltos, profundidade_maxima)
+    afirma_ausencia, explicacao = descrever(desfecho, distancia, profundidade_maxima)
     return RespostaDeCaminho(
         desfecho=desfecho,
         afirma_ausencia=afirma_ausencia,
         explicacao=explicacao,
         de=de.completo,
         para=para.completo,
-        saltos=saltos,
+        distancia=distancia,
         caminho=caminho or [],
         profundidade_maxima=profundidade_maxima,
         visitados=visitados,

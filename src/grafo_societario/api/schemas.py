@@ -8,11 +8,15 @@ A API acrescenta um quinto, que não vem da travessia: `sem_vinculo`, que sai de
 
 | desfecho | significa | afirma ausência? |
 |---|---|---|
-| `encontrado` | achou caminho | — |
+| `encontrado` | achou caminho, e ele cabe no limite pedido | — |
 | `sem_vinculo` | a empresa existe no recorte e não tem vínculo nenhum | sim |
 | `componentes_diferentes` | as duas têm vínculos e não se alcançam | sim |
-| `alem_do_limite` | há caminho, mais longo que o pedido | **não** |
+| `alem_do_limite` | há caminho, **a esta distância**, mais longo que o pedido | **não** |
 | `orcamento_excedido` | há caminho, a busca desistiu antes | **não** |
+
+`alem_do_limite` **afirma presença**, e não ignorância: a busca vai até o fim, e
+o que o limite decide é se o caminho é exibido. `orcamento_excedido` é o único
+"não sei" que sobrou.
 
 Nenhum deles é erro de HTTP. `404` fica reservado a CNPJ ausente do recorte, que
 é outra coisa: o pedido referencia empresa que não existe.
@@ -107,14 +111,21 @@ class RespostaDeCaminho(BaseModel):
     explicacao: str = Field(description="O desfecho em uma frase, para a interface exibir.")
     de: str
     para: str
-    saltos: int | None = Field(
-        description="Arestas do caminho. Nulo quando não há caminho — e não zero, que é a "
-        "resposta legítima de uma empresa para ela mesma."
+    distancia: int | None = Field(
+        description="Distância entre as duas empresas, em saltos. Conhecida em `encontrado` e "
+        "**também em `alem_do_limite`**, onde o caminho não é mostrado mas a distância é um "
+        "achado verdadeiro: o vínculo existe e é remoto. Nula quando não há caminho ou quando "
+        "a busca desistiu."
     )
     caminho: list[NoDaResposta] = Field(
-        description="Da origem ao destino. Vazio em todo desfecho que não seja `encontrado`."
+        description="Os nós, da origem ao destino. Preenchido **apenas** em `encontrado` — em "
+        "`alem_do_limite` a distância é conhecida e o caminho não é exibido."
     )
-    profundidade_maxima: int = Field(description="O limite efetivamente usado nesta busca.")
+    profundidade_maxima: int = Field(
+        description="O limite pedido. Ele governa **até onde o caminho é mostrado**, e não até "
+        "onde a busca procura: a busca vai até o fim, com o orçamento de visitados como único "
+        "freio."
+    )
     visitados: int = Field(
         description="Nós tocados pela travessia. Zero quando a resposta saiu do rótulo de "
         "componente, sem percorrer nada."

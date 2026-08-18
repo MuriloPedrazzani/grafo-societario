@@ -130,7 +130,7 @@ def test_encontra_o_caminho_com_a_pessoa_fisica_no_meio(cliente: Any) -> None:
     corpo = resposta.json()
     assert corpo["desfecho"] == "encontrado"
     assert corpo["afirma_ausencia"] is False
-    assert corpo["saltos"] == 2
+    assert corpo["distancia"] == 2
     assert [no["tipo"] for no in corpo["caminho"]] == [
         "pessoa_juridica",
         "pessoa_fisica",
@@ -180,7 +180,7 @@ def test_a_empresa_consigo_mesma_tem_zero_saltos(cliente: Any) -> None:
     corpo = consultar(cliente, ALFA, ALFA).json()
 
     assert corpo["desfecho"] == "encontrado"
-    assert corpo["saltos"] == 0
+    assert corpo["distancia"] == 0
     assert len(corpo["caminho"]) == 1
 
 
@@ -198,7 +198,7 @@ def test_empresa_sem_vinculo_nao_vira_componentes_diferentes(cliente: Any) -> No
     assert corpo["desfecho"] == "sem_vinculo"
     assert corpo["afirma_ausencia"] is True
     assert corpo["caminho"] == []
-    assert corpo["saltos"] is None
+    assert corpo["distancia"] is None
 
 
 def test_empresa_sem_vinculo_consigo_mesma_continua_sem_vinculo(cliente: Any) -> None:
@@ -214,14 +214,42 @@ def test_componentes_diferentes_quando_as_duas_tem_vinculo(cliente: Any) -> None
     assert corpo["afirma_ausencia"] is True
 
 
-def test_alem_do_limite_nao_afirma_ausencia(cliente: Any) -> None:
-    """O caminho existe e é mais longo que o pedido. Responder ausência aqui seria
-    o serviço dizer "não têm vínculo" quando a verdade é "não procurei até lá"."""
+def test_alem_do_limite_traz_a_distancia_real(cliente: Any) -> None:
+    """O limite governa **o que é mostrado**, não até onde se procura.
+
+    A busca vai até o fim com o orçamento como único freio, então este desfecho
+    deixou de ser "não procurei até lá" e passou a ser um achado verdadeiro: o
+    vínculo existe e está a esta distância. É a informação que o projeto vem
+    dizendo ser a interessante — grafo societário não é mundo pequeno.
+    """
     corpo = consultar(cliente, ALFA, BRAVO, profundidade_maxima=1).json()
 
     assert corpo["desfecho"] == "alem_do_limite"
     assert corpo["afirma_ausencia"] is False
-    assert "profundidade_maxima" in corpo["explicacao"]
+    assert corpo["distancia"] == 2, "a distância real, e não o limite pedido"
+    assert "2 saltos" in corpo["explicacao"]
+
+
+def test_alem_do_limite_nao_mostra_o_caminho(cliente: Any) -> None:
+    """Saber a distância é diferente de ver o caminho, e o limite separa os dois."""
+    corpo = consultar(cliente, ALFA, BRAVO, profundidade_maxima=1).json()
+
+    assert corpo["caminho"] == []
+    assert corpo["profundidade_maxima"] == 1
+
+
+def test_o_limite_deixa_de_esconder_a_existencia_do_vinculo(cliente: Any) -> None:
+    """Controle: o mesmo par, com limite generoso, dá a mesma distância.
+
+    Se a busca ainda parasse no limite, a distância mudaria com ele — e é
+    exatamente isso que este teste existe para impedir que volte.
+    """
+    curto = consultar(cliente, ALFA, BRAVO, profundidade_maxima=1).json()
+    longo = consultar(cliente, ALFA, BRAVO, profundidade_maxima=50).json()
+
+    assert curto["distancia"] == longo["distancia"] == 2
+    assert curto["desfecho"] == "alem_do_limite"
+    assert longo["desfecho"] == "encontrado"
 
 
 def test_orcamento_excedido_nao_afirma_ausencia(
@@ -353,7 +381,7 @@ AFIRMAM_AUSENCIA = {DesfechoDaConsulta.SEM_VINCULO, DesfechoDaConsulta.COMPONENT
 def test_todo_desfecho_da_consulta_declara_se_afirma_ausencia(desfecho: DesfechoDaConsulta) -> None:
     """Dois dos cinco afirmam ausência, e o campo existe para que o consumidor não
     precise saber quais de cabeça."""
-    afirma, explicacao = descrever(desfecho, saltos=None, profundidade_maxima=10)
+    afirma, explicacao = descrever(desfecho, distancia=None, profundidade_maxima=10)
 
     assert explicacao.strip()
     assert afirma is (desfecho in AFIRMAM_AUSENCIA)
