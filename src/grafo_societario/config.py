@@ -136,6 +136,22 @@ class Config(ConexaoRfb):
     Release e para imagem Docker, e nome que entrou no artefato já saiu. Filtrar
     depois não desfaz publicação."""
 
+    limite_por_minuto: int = 60
+    """Requisições por cliente por minuto na API.
+
+    O número sai do propósito: o limite é contra **varredura**, e não contra pico
+    de visitante. A 60 por minuto, varrer os 19.770.618 CNPJs do recorte leva
+    **229 dias** ininterruptos, enquanto um por segundo sustentado está acima do
+    que qualquer pessoa navegando alcança. Ver `api/limite.py`."""
+
+    proxies_confiaveis: int = 0
+    """Quantos saltos de proxy você **controla**, para ler `X-Forwarded-For`.
+
+    Zero ignora o cabeçalho e usa o IP da conexão, que é o único que não se
+    forja. Atrás do proxy de um free tier o valor certo é outro, e ele só se sabe
+    no commit 44 — o padrão é o seguro, não o correto para o deploy, e o
+    `/health` declara qual está em uso."""
+
     @field_validator("uf_alvo")
     @classmethod
     def _uf_conhecida(cls, valor: str) -> str:

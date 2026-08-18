@@ -31,11 +31,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from grafo_societario import __version__
 from grafo_societario.api import caminho, empresa, vizinhanca
 from grafo_societario.api.deps import AcervoDep, ciclo
+from grafo_societario.api.erros import registrar_tratadores
+from grafo_societario.api.limite import limitar
 from grafo_societario.config import Config
 
 
@@ -51,9 +53,14 @@ def criar_aplicacao(config: Config | None = None) -> FastAPI:
     )
     if config is not None:
         app.state.config = config
-    app.include_router(caminho.roteador)
-    app.include_router(vizinhanca.roteador)
-    app.include_router(empresa.roteador)
+    registrar_tratadores(app)
+    # O limitador entra nas rotas de consulta e **não** no `/health`: a
+    # plataforma o consulta para decidir se manda tráfego, e limitá-lo faria o
+    # limitador derrubar a própria instância.
+    consulta = [Depends(limitar)]
+    app.include_router(caminho.roteador, dependencies=consulta)
+    app.include_router(vizinhanca.roteador, dependencies=consulta)
+    app.include_router(empresa.roteador, dependencies=consulta)
 
     @app.get("/health", tags=["operação"])
     def health(acervo: AcervoDep) -> dict[str, Any]:
@@ -74,6 +81,10 @@ def criar_aplicacao(config: Config | None = None) -> FastAPI:
                 "empresas_no_recorte": int(acervo.existencia.size),
             },
             "artefatos": acervo.somas,
+            "limite": {
+                "por_minuto": acervo.config.limite_por_minuto,
+                "proxies_confiaveis": acervo.config.proxies_confiaveis,
+            },
             "segundos_de_partida": round(acervo.segundos_de_partida, 3),
         }
 

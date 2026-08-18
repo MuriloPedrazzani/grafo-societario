@@ -63,6 +63,7 @@ from typing import Annotated, Any
 import numpy as np
 from fastapi import Depends, FastAPI, Request
 
+from grafo_societario.api.limite import Limitador
 from grafo_societario.config import Config, carregar_config
 from grafo_societario.graph.artefatos import somas_dos_artefatos
 from grafo_societario.graph.catalogo import Catalogo, abrir_catalogo, procurar
@@ -208,6 +209,18 @@ async def ciclo(app: FastAPI) -> AsyncIterator[None]:
     """Carrega antes de aceitar tráfego, e deixa a exceção subir se algo falta."""
     config = getattr(app.state, "config", None) or carregar_config()
     app.state.acervo = carregar_acervo(config)
+    app.state.limitador = Limitador(
+        por_minuto=config.limite_por_minuto, proxies_confiaveis=config.proxies_confiaveis
+    )
+    if config.proxies_confiaveis == 0:
+        logger.info(
+            "limitador usando o IP da conexão",
+            extra={
+                "limite_por_minuto": config.limite_por_minuto,
+                "proxies_confiaveis": 0,
+                "aviso": "atrás de proxy isto conta todos os clientes no mesmo balde",
+            },
+        )
     yield
 
 
