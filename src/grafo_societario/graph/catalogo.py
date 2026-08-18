@@ -68,7 +68,7 @@ SEM_REGIAO: Final = -1
 """Região fiscal de quem não tem CPF. `0` é dígito válido e não serve de ausência."""
 
 
-def _procurar(
+def procurar(
     ordenado: np.ndarray[Any, np.dtype[Any]],
     valor: int,
     lado: Literal["left", "right"] = "left",
@@ -165,7 +165,7 @@ class Catalogo:
         vínculo nenhum, e aí ela não é nó. Quem responde existência é
         `existencia.npy`.
         """
-        posicao = _procurar(self.cnpj_ordenado, cnpj_basico)
+        posicao = procurar(self.cnpj_ordenado, cnpj_basico)
         if posicao >= self.cnpj_ordenado.size:
             return None
         if int(self.cnpj_ordenado[posicao]) != cnpj_basico:
@@ -184,7 +184,7 @@ class Catalogo:
         fim = int(self.nome_offsets[indice + 1])
         if inicio == fim:
             return None
-        bloco = _procurar(self.bloco_inicio, inicio, "right") - 1
+        bloco = procurar(self.bloco_inicio, inicio, "right") - 1
         comprimido = self.nomes[int(self.bloco_byte[bloco]) : int(self.bloco_byte[bloco + 1])]
         aberto = zlib.decompress(comprimido.tobytes())
         base = int(self.bloco_inicio[bloco])
@@ -207,7 +207,7 @@ class Catalogo:
         `O(n log n)` no caminho de resposta. Derivar na partida paga uma vez.
         """
         self._validar(indice)
-        posicao = _procurar(self.no_crescente, indice)
+        posicao = procurar(self.no_crescente, indice)
         if posicao >= self.no_crescente.size or int(self.no_crescente[posicao]) != indice:
             return None
         return f"{int(self.cnpj_do_no_crescente[posicao]):08d}"

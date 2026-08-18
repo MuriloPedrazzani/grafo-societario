@@ -65,7 +65,7 @@ from fastapi import Depends, FastAPI, Request
 
 from grafo_societario.config import Config, carregar_config
 from grafo_societario.graph.artefatos import somas_dos_artefatos
-from grafo_societario.graph.catalogo import Catalogo, abrir_catalogo
+from grafo_societario.graph.catalogo import Catalogo, abrir_catalogo, procurar
 from grafo_societario.graph.csr import Grafo, abrir_grafo, carregar_componentes
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,20 @@ class Acervo:
     @property
     def arestas(self) -> int:
         return self.grafo.posicoes // 2
+
+    def existe_no_recorte(self, cnpj_basico: int) -> bool:
+        """Se a empresa está no recorte desta competência, por busca binária exata.
+
+        **Não confundir com ser nó do grafo.** 74,8% do recorte não tem vínculo
+        nenhum e fica fora do CSR — existe e não é nó. As duas respostas são
+        diferentes, e é esta que separa `404` de `sem_vinculo`.
+
+        A busca é exata, sobre array ordenado, e não filtro probabilístico: um
+        falso positivo aqui faria a API afirmar que uma empresa existe no recorte
+        quando ela não existe.
+        """
+        posicao = procurar(self.existencia, cnpj_basico)
+        return posicao < self.existencia.size and int(self.existencia[posicao]) == cnpj_basico
 
 
 def carregar_acervo(config: Config, competencia: str | None = None) -> Acervo:
