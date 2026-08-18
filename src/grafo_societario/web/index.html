@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grafo Societário — caminhos entre empresas brasileiras</title>
+<meta name="description" content="Caminhos societários entre empresas brasileiras, a partir dos dados abertos de CNPJ da Receita Federal.">
+<link rel="stylesheet" href="/static/estilo.css">
+</head>
+<body>
+
+<header class="topo">
+  <h1>Grafo Societário</h1>
+  <p class="chamada">
+    Duas empresas brasileiras têm algum vínculo societário? Este serviço responde
+    percorrendo o quadro de sócios da Receita Federal.
+  </p>
+  <p class="faixa" id="faixa" aria-live="polite">carregando os dados no ar…</p>
+</header>
+
+<main>
+  <form class="consulta" id="consulta" autocomplete="off">
+    <div class="campo">
+      <label for="de">Empresa de origem</label>
+      <input id="de" name="de" inputmode="numeric" spellcheck="false"
+             placeholder="00.000.000/0001-00" aria-describedby="erro-de">
+      <p class="erro-do-campo" id="erro-de" hidden></p>
+    </div>
+
+    <div class="campo">
+      <label for="para">Empresa de destino</label>
+      <input id="para" name="para" inputmode="numeric" spellcheck="false"
+             placeholder="00.000.000/0001-00" aria-describedby="erro-para">
+      <p class="erro-do-campo" id="erro-para" hidden></p>
+    </div>
+
+    <div class="campo campo-estreito">
+      <label for="profundidade">Saltos</label>
+      <input id="profundidade" name="profundidade" type="number" min="1" value="10">
+    </div>
+
+    <button type="submit" id="consultar">Consultar</button>
+  </form>
+
+  <section id="resultado" class="resultado" aria-live="polite"></section>
+
+  <details class="cru">
+    <summary>Ver a resposta da API</summary>
+    <p class="nota">
+      A mesma consulta em <code>GET /caminho</code>. A documentação interativa está
+      em <a href="/docs">/docs</a>.
+    </p>
+    <pre id="cru"></pre>
+  </details>
+</main>
+
+<footer class="rodape">
+  <p>
+    Dados abertos de CNPJ da Receita Federal. O serviço descreve <strong>estrutura de
+    rede</strong>: não avalia idoneidade, não imputa conduta e não deve embasar decisão
+    sobre pessoas ou empresas.
+  </p>
+  <p>
+    Pessoas físicas aparecem pseudonimizadas por padrão — o nome não entra no artefato
+    publicado, e o rótulo que aparece aqui vale só dentro desta resposta.
+  </p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
