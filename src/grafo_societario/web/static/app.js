@@ -18,6 +18,18 @@ const EXEMPLO = { de: "21.278.675/0001-77", para: "11.844.766/0001-79", profundi
 
 const DISTANCIA_MEDIANA = 20;
 const DEMORA_PARA_AVISAR = 2000;
+const SALTOS_DA_VIZINHANCA = 2;
+
+// O teto desta página, e não o da API.
+//
+// A API devolve até 1.000 nós porque o limite dela é de latência: cada nome custa
+// uma descompressão de 0,35 ms. O limite de um **desenho** é outro — 747 nós são
+// 119 KB de resposta e uma bola de pelo na tela. A tabela dos dois regimes está
+// na descrição do parâmetro justamente para quem desenha escolher o próprio.
+//
+// A 150, a empresa aleatória nunca encosta no teto (mediana de 3 nós, p95 de 17)
+// e o hub é recusado — e a recusa é o achado, não a falha.
+const TETO_DA_PAGINA = 150;
 
 // Título e tom por desfecho. O texto explicativo vem da API, nunca daqui.
 //
@@ -62,10 +74,16 @@ const DESFECHOS = {
 
 const alvo = (id) => document.getElementById(id);
 const resultado = alvo("resultado");
+let modo = "caminho";
+let desenhoAtual = null;
 
 function saltos(quantos) {
   if (quantos === null || quantos === undefined) return "distância desconhecida";
   return quantos === 1 ? "1 salto" : `${quantos} saltos`;
+}
+
+function contar(quantos, singular, plural) {
+  return quantos === 1 ? `1 ${singular}` : `${quantos} ${plural}`;
 }
 
 // A API marca ênfase com `**` porque o mesmo texto aparece no /docs, que é
@@ -118,25 +136,32 @@ function mostrarErroDeCampo(campo, mensagem) {
   alvo(campo).setAttribute("aria-invalid", mensagem ? "true" : "false");
 }
 
-// ----------------------------------------------------------------- desenho
+// ----------------------------------------------------------------- cartões
 
-function cartaoDeResposta(corpo) {
+function cartao(tom, selo, titulo, explicacao) {
+  const caixa = elemento("article", `cartao cartao-${tom}`);
+  caixa.appendChild(elemento("p", "selo", selo));
+  caixa.appendChild(elemento("h2", "titulo", titulo));
+  const paragrafo = elemento("p", "explicacao");
+  paragrafo.appendChild(comEnfase(explicacao));
+  caixa.appendChild(paragrafo);
+  return caixa;
+}
+
+function cartaoDoCaminho(corpo) {
   const forma = DESFECHOS[corpo.desfecho];
   // Desfecho que a página não conhece ainda assim se explica: `explicacao` vem
   // preenchida sempre. Degradar para o texto do servidor é melhor que uma tela
   // em branco — mas o teste de fronteira existe para isto não acontecer.
-  const tom = forma ? forma.tom : "incerto";
-  const titulo = forma ? forma.titulo(corpo) : corpo.desfecho;
-
-  const cartao = elemento("article", `cartao cartao-${tom}`);
-  cartao.appendChild(elemento("p", "selo", corpo.desfecho));
-  cartao.appendChild(elemento("h2", "titulo", titulo));
-  const explicacao = elemento("p", "explicacao");
-  explicacao.appendChild(comEnfase(corpo.explicacao));
-  cartao.appendChild(explicacao);
+  const caixa = cartao(
+    forma ? forma.tom : "incerto",
+    corpo.desfecho,
+    forma ? forma.titulo(corpo) : corpo.desfecho,
+    corpo.explicacao
+  );
 
   if (forma && forma.contexto) {
-    cartao.appendChild(elemento("p", "contexto", forma.contexto(corpo)));
+    caixa.appendChild(elemento("p", "contexto", forma.contexto(corpo)));
   }
   if (forma && forma.acao) {
     const acao = forma.acao(corpo);
@@ -146,28 +171,92 @@ function cartaoDeResposta(corpo) {
       alvo("profundidade").value = acao.profundidade;
       consultar();
     });
-    cartao.appendChild(botao);
+    caixa.appendChild(botao);
   }
   if (corpo.caminho && corpo.caminho.length) {
-    cartao.appendChild(listaDoCaminho(corpo.caminho));
+    caixa.appendChild(listaDeNos(corpo.caminho));
   }
-  return cartao;
+  return caixa;
 }
 
-function listaDoCaminho(caminho) {
+// A recusa do teto é superfície de desenho, e não erro.
+//
+// "Esta empresa tem 1.132 vizinhos no primeiro salto" é o achado do hub: é a
+// tela que mostra que o grafo tem estrutura que não cabe numa tela. Por isso ela
+// usa o mesmo cartão da resposta, com o tom de achado — nunca a faixa de
+// problema.
+function cartaoDaVizinhanca(corpo) {
+  if (!corpo.tem_vinculo) {
+    return cartao("ausencia", "sem_vinculo", "Sem vínculo societário registrado", corpo.explicacao);
+  }
+
+  const quantos = corpo.nos.length;
+  // Arestas além das que uma árvore teria: são os ciclos, e são o motivo de o
+  // subgrafo induzido valer mais que a árvore de busca. Duas empresas que
+  // compartilham um segundo sócio aparecem ligadas aqui e soltas numa árvore.
+  const alemDaArvore = Math.max(0, corpo.arestas.length - (quantos - 1));
+
+  let titulo;
+  if (corpo.truncada && corpo.saltos === 0) {
+    titulo = `Esta empresa tem ${corpo.nivel_recusado.toLocaleString("pt-BR")} vizinhos ` +
+      "no primeiro salto";
+  } else if (corpo.truncada) {
+    titulo = `${contar(quantos, "nó desenhado", "nós desenhados")}; o salto seguinte ` +
+      `traz mais ${corpo.nivel_recusado.toLocaleString("pt-BR")}`;
+  } else if (alemDaArvore > 0) {
+    // O título diz o que a `explicacao` da API não diz. Repetir "N nós a até X
+    // saltos", que é a primeira frase dela, era a segunda versão da mesma frase.
+    titulo = `${contar(quantos, "nó", "nós")} e ${contar(quantos === 1 ? 0 : corpo.arestas.length, "vínculo", "vínculos")} — ` +
+      `${contar(alemDaArvore, "ligação a mais", "ligações a mais")} que numa árvore`;
+  } else {
+    titulo = `${contar(quantos, "nó", "nós")}, sem nenhum ciclo`;
+  }
+
+  const caixa = cartao("achado", "vizinhanca", titulo, corpo.explicacao);
+  if (alemDaArvore > 0) {
+    caixa.appendChild(
+      elemento(
+        "p",
+        "contexto",
+        "As ligações a mais são o que uma árvore de busca esconderia: elas fecham ciclo, " +
+          "e é por isso que o que volta é o subgrafo induzido — toda aresta entre os nós " +
+          "devolvidos, inclusive as do mesmo salto."
+      )
+    );
+  }
+  if (corpo.truncada) {
+    caixa.appendChild(
+      elemento(
+        "p",
+        "contexto",
+        `Esta página desenha no máximo ${TETO_DA_PAGINA} nós. O limite de um desenho não ` +
+          "é o de uma resposta: a API devolveria até mil, e mil nós numa tela não se leem. " +
+          "O nível foi recusado inteiro — meio nível pareceria completo sem ser."
+      )
+    );
+  }
+  caixa.appendChild(listaDeNos(corpo.nos));
+  return caixa;
+}
+
+function listaDeNos(nos) {
   const lista = elemento("ol", "caminho");
-  for (const no of caminho) {
+  for (const no of nos) {
     const item = elemento("li", `no no-${no.tipo}`);
     item.appendChild(elemento("span", "nome", no.nome || no.rotulo || "—"));
-    const detalhe = [];
-    if (no.cnpj) detalhe.push(no.cnpj);
-    const quantos = no.vinculos_no_recorte;
-    detalhe.push(quantos === 1 ? "1 vínculo no recorte" : `${quantos} vínculos no recorte`);
-    if (no.no_recorte === false) detalhe.push("matriz fora do recorte");
-    item.appendChild(elemento("span", "detalhe", detalhe.join(" · ")));
+    item.appendChild(elemento("span", "detalhe", detalheDoNo(no)));
     lista.appendChild(item);
   }
   return lista;
+}
+
+function detalheDoNo(no) {
+  const partes = [];
+  if (no.cnpj) partes.push(no.cnpj);
+  partes.push(contar(no.vinculos_no_recorte, "vínculo no recorte", "vínculos no recorte"));
+  if (no.profundidade !== undefined) partes.push(`${saltos(no.profundidade)} da origem`);
+  if (no.no_recorte === false) partes.push("matriz fora do recorte");
+  return partes.join(" · ");
 }
 
 // Problema tem outra cara de propósito: faixa, e não cartão. `sem_vinculo` e
@@ -180,12 +269,36 @@ function faixaDeProblema(titulo, texto, codigo) {
   return faixa;
 }
 
+// ----------------------------------------------------------------- desenho
+
+function esconderDesenho() {
+  alvo("desenho").hidden = true;
+  if (desenhoAtual) {
+    desenhoAtual.destroy();
+    desenhoAtual = null;
+  }
+}
+
+function mostrarDesenho(elementos) {
+  if (!elementos.length) {
+    esconderDesenho();
+    return;
+  }
+  alvo("desenho").hidden = false;
+  if (desenhoAtual) desenhoAtual.destroy();
+  alvo("detalhe-do-no").textContent = "Clique num nó para ver o nome inteiro.";
+  desenhoAtual = window.Desenho.desenhar(alvo("tela"), elementos, (no) => {
+    alvo("detalhe-do-no").textContent = `${no.nome || no.rotulo} — ${detalheDoNo(no)}`;
+  });
+}
+
 function limpar() {
   resultado.replaceChildren();
 }
 
 function carregando() {
   limpar();
+  esconderDesenho();
   const aviso = elemento("p", "carregando", "consultando o grafo…");
   resultado.appendChild(aviso);
   // Num plano gratuito que hiberna, a primeira consulta acorda a instância.
@@ -198,36 +311,57 @@ function carregando() {
 
 // ---------------------------------------------------------------- consulta
 
+function enderecoDaConsulta() {
+  const de = somenteDigitos(alvo("de").value);
+  const profundidade = alvo("profundidade").value || "1";
+  if (modo === "vizinhanca") {
+    return `/vizinhanca?${new URLSearchParams({
+      cnpj: de,
+      saltos: profundidade,
+      teto_de_nos: String(TETO_DA_PAGINA),
+    })}`;
+  }
+  return `/caminho?${new URLSearchParams({
+    de,
+    para: somenteDigitos(alvo("para").value),
+    profundidade_maxima: profundidade,
+  })}`;
+}
+
 async function consultar() {
-  const de = alvo("de").value;
-  const para = alvo("para").value;
-  const problemaDe = conferirForma(de);
-  const problemaPara = conferirForma(para);
+  const problemaDe = conferirForma(alvo("de").value);
+  const problemaPara = modo === "caminho" ? conferirForma(alvo("para").value) : null;
   mostrarErroDeCampo("de", problemaDe);
-  mostrarErroDeCampo("para", problemaPara);
+  if (modo === "caminho") mostrarErroDeCampo("para", problemaPara);
   if (problemaDe || problemaPara) {
     limpar();
+    esconderDesenho();
     return;
   }
-
-  const parametros = new URLSearchParams({
-    de: somenteDigitos(de),
-    para: somenteDigitos(para),
-    profundidade_maxima: alvo("profundidade").value || "10",
-  });
 
   const relogio = carregando();
   alvo("consultar").disabled = true;
   try {
-    const resposta = await fetch(`/caminho?${parametros}`);
+    const resposta = await fetch(enderecoDaConsulta());
     const corpo = await resposta.json();
     alvo("cru").textContent = JSON.stringify(corpo, null, 2);
     limpar();
-    resultado.appendChild(
-      resposta.ok ? cartaoDeResposta(corpo) : faixaDoStatus(resposta, corpo)
-    );
+
+    if (!resposta.ok) {
+      resultado.appendChild(faixaDoStatus(resposta, corpo));
+      esconderDesenho();
+      return;
+    }
+    if (modo === "vizinhanca") {
+      resultado.appendChild(cartaoDaVizinhanca(corpo));
+      mostrarDesenho(corpo.tem_vinculo ? window.Desenho.elementosDaVizinhanca(corpo) : []);
+    } else {
+      resultado.appendChild(cartaoDoCaminho(corpo));
+      mostrarDesenho(window.Desenho.elementosDoCaminho(corpo.caminho || []));
+    }
   } catch (erro) {
     limpar();
+    esconderDesenho();
     resultado.appendChild(
       faixaDeProblema(
         "Não consegui falar com o serviço",
@@ -265,6 +399,20 @@ function faixaDoStatus(resposta, corpo) {
   );
 }
 
+// ------------------------------------------------------------------- modos
+
+function trocarModo(novo) {
+  modo = novo;
+  const vizinhanca = novo === "vizinhanca";
+  alvo("bloco-para").hidden = vizinhanca;
+  alvo("rotulo-de").textContent = vizinhanca ? "Empresa" : "Empresa de origem";
+  alvo("profundidade").value = vizinhanca ? SALTOS_DA_VIZINHANCA : EXEMPLO.profundidade;
+  alvo("modo-caminho").setAttribute("aria-selected", String(!vizinhanca));
+  alvo("modo-vizinhanca").setAttribute("aria-selected", String(vizinhanca));
+  mostrarErroDeCampo("para", null);
+  consultar();
+}
+
 // ------------------------------------------------------------------ partida
 
 async function preencherFaixa() {
@@ -287,6 +435,8 @@ function iniciar() {
     evento.preventDefault();
     consultar();
   });
+  alvo("modo-caminho").addEventListener("click", () => trocarModo("caminho"));
+  alvo("modo-vizinhanca").addEventListener("click", () => trocarModo("vizinhanca"));
   // O `/health` é barato e não entra no limite: ele preenche o primeiro segundo
   // enquanto a consulta do exemplo corre.
   preencherFaixa();

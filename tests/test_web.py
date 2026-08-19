@@ -30,7 +30,9 @@ commit que acrescentar um desfecho passa verde e quebra a demonstração.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -40,9 +42,13 @@ from grafo_societario.api.main import criar_aplicacao
 from grafo_societario.api.schemas import DesfechoDaConsulta
 from grafo_societario.api.web import ESTATICOS, PAGINA
 from grafo_societario.config import Config
+from grafo_societario.graph.catalogo import TIPOS
 from test_caminho import grafo_de_exemplo  # noqa: F401
 
 APP_JS = ESTATICOS / "app.js"
+DESENHO_JS = ESTATICOS / "desenho.js"
+VENDORIZADO = ESTATICOS / "vendor" / "cytoscape.min.js"
+PROCEDENCIA = Path(__file__).resolve().parents[1] / "docs" / "dependencias_vendorizadas.md"
 
 
 @pytest.fixture
@@ -72,6 +78,16 @@ def test_a_pagina_conhece_todos_os_desfechos() -> None:
     )
 
 
+def test_o_desenho_conhece_todos_os_tipos_de_no() -> None:
+    """A mesma guarda, para os três tipos: forma distinta por tipo é promessa da
+    legenda, e um tipo novo sairia com a forma padrão sem nada falhar."""
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    ausentes = [tipo for tipo in TIPOS if tipo not in fonte]
+
+    assert not ausentes, f"o desenho não distingue {', '.join(ausentes)}"
+
+
 def test_a_guarda_de_fronteira_sabe_reprovar() -> None:
     """Controle positivo: uma guarda que só compara strings passa fácil demais.
 
@@ -94,10 +110,33 @@ def test_a_raiz_devolve_a_pagina(cliente: Any) -> None:
     assert "Grafo Societário" in resposta.text
 
 
-@pytest.mark.parametrize("arquivo", ["app.js", "estilo.css"])
+@pytest.mark.parametrize(
+    "arquivo", ["app.js", "desenho.js", "estilo.css", "vendor/cytoscape.min.js"]
+)
 def test_os_estaticos_sao_servidos_pela_mesma_origem(cliente: Any, arquivo: str) -> None:
-    """Mesma origem é o que dispensa CORS e paga um despertar em vez de dois."""
+    """Mesma origem é o que dispensa CORS e paga um despertar em vez de dois.
+
+    A biblioteca de desenho entra nisso: vinda de CDN, ela reintroduziria a
+    segunda origem que a decisão evita, e com um modo de falha a mais — a
+    demonstração cairia quando a CDN caísse, por motivo alheio a este projeto.
+    """
     assert cliente.get(f"/static/{arquivo}").status_code == 200
+
+
+def test_a_biblioteca_vendorizada_confere_com_a_procedencia() -> None:
+    """Dependência sem procedência é dependência que ninguém confere depois.
+
+    A soma está em `docs/dependencias_vendorizadas.md`, e este teste é o que
+    impede a tabela de envelhecer em silêncio quando alguém trocar o arquivo.
+    """
+    soma = hashlib.sha256(VENDORIZADO.read_bytes()).hexdigest()
+    documentado = PROCEDENCIA.read_text(encoding="utf-8")
+
+    assert soma in documentado, (
+        f"o cytoscape.min.js tem soma {soma}, que não está em "
+        "docs/dependencias_vendorizadas.md. Trocar a biblioteca é decisão, e decisão "
+        "atualiza a procedência junto."
+    )
 
 
 def test_a_pagina_abre_com_um_exemplo_preenchido() -> None:

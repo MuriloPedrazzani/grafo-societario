@@ -33,10 +33,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from fastapi import APIRouter, FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,28 @@ imagem da Fase 8 sem regra de cópia própria."""
 PAGINA: Final = RAIZ / "index.html"
 ESTATICOS: Final = RAIZ / "static"
 
+REVALIDAR: Final = "no-cache"
+"""`no-cache` não é "não guarde": é **"guarde e confirme antes de usar"**.
+
+Com o `ETag` que o Starlette já envia, confirmar custa um `304` vazio. Sem esse
+cabeçalho o navegador aplica frescor heurístico e pode servir um `app.js` velho
+contra uma API nova — a forma de quebra mais confusa que existe, porque a página
+parece funcionar e responde errado.
+
+Não é hipótese: aconteceu na verificação deste commit. O servidor entregava o
+arquivo novo, o navegador desenhava com o antigo, e a única pista era o título do
+cartão não mudar."""
+
+
+class EstaticosRevalidados(StaticFiles):
+    """`StaticFiles` que manda revalidar. Ver `REVALIDAR`."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        resposta: Response = super().file_response(*args, **kwargs)
+        resposta.headers["Cache-Control"] = REVALIDAR
+        return resposta
+
+
 roteador = APIRouter(include_in_schema=False)
 """Fora do OpenAPI de propósito: `/docs` descreve a API, e a página não é API."""
 
@@ -57,7 +79,7 @@ roteador = APIRouter(include_in_schema=False)
 @roteador.get("/")
 def pagina() -> FileResponse:
     """A página de consulta. Mesma origem da API que ela consome."""
-    return FileResponse(PAGINA, media_type="text/html")
+    return FileResponse(PAGINA, media_type="text/html", headers={"Cache-Control": REVALIDAR})
 
 
 class PaginaAusenteError(RuntimeError):
@@ -79,4 +101,4 @@ def montar(app: FastAPI) -> None:
             "Eles viajam dentro do pacote, então a falta indica empacotamento incompleto."
         )
     app.include_router(roteador)
-    app.mount("/static", StaticFiles(directory=ESTATICOS), name="static")
+    app.mount("/static", EstaticosRevalidados(directory=ESTATICOS), name="static")

@@ -19,15 +19,24 @@
 </header>
 
 <main>
+  <div class="modos" role="tablist" aria-label="Tipo de consulta">
+    <button type="button" class="modo" id="modo-caminho" role="tab" aria-selected="true">
+      Caminho entre duas
+    </button>
+    <button type="button" class="modo" id="modo-vizinhanca" role="tab" aria-selected="false">
+      Vizinhança de uma
+    </button>
+  </div>
+
   <form class="consulta" id="consulta" autocomplete="off">
     <div class="campo">
-      <label for="de">Empresa de origem</label>
+      <label for="de" id="rotulo-de">Empresa de origem</label>
       <input id="de" name="de" inputmode="numeric" spellcheck="false"
              placeholder="00.000.000/0001-00" aria-describedby="erro-de">
       <p class="erro-do-campo" id="erro-de" hidden></p>
     </div>
 
-    <div class="campo">
+    <div class="campo" id="bloco-para">
       <label for="para">Empresa de destino</label>
       <input id="para" name="para" inputmode="numeric" spellcheck="false"
              placeholder="00.000.000/0001-00" aria-describedby="erro-para">
@@ -44,11 +53,25 @@
 
   <section id="resultado" class="resultado" aria-live="polite"></section>
 
+  <figure class="desenho" id="desenho" hidden>
+    <div id="tela" class="tela"></div>
+    <figcaption>
+      <p class="detalhe-do-no" id="detalhe-do-no">Clique num nó para ver o nome inteiro.</p>
+      <ul class="legenda">
+        <li><span class="marca marca-pj"></span>empresa</li>
+        <li><span class="marca marca-pf"></span>pessoa física, pseudonimizada</li>
+        <li><span class="marca marca-estrangeiro"></span>sócio estrangeiro</li>
+        <li><span class="marca marca-conector"></span>matriz fora do recorte — <strong>a vizinhança
+          deste nó está incompleta</strong>, só entraram os vínculos com empresas daqui</li>
+      </ul>
+    </figcaption>
+  </figure>
+
   <details class="cru">
     <summary>Ver a resposta da API</summary>
     <p class="nota">
-      A mesma consulta em <code>GET /caminho</code>. A documentação interativa está
-      em <a href="/docs">/docs</a>.
+      A mesma consulta em <code>GET /caminho</code> ou <code>GET /vizinhanca</code>. A
+      documentação interativa está em <a href="/docs">/docs</a>.
     </p>
     <pre id="cru"></pre>
   </details>
@@ -66,6 +89,8 @@
   </p>
 </footer>
 
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/desenho.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

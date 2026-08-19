@@ -52,7 +52,19 @@ PARTIDO = re.compile(r"(?<![0-9])[0-9]{9}[-. ][0-9]{2}(?![0-9])")
 PONTUADO = re.compile(r"[0-9]{3}\.[0-9]{3}\.[0-9]{3}[-.][0-9]{2}")
 
 
-RASTREADOS = (".py", ".md", ".toml", ".yml", ".cfg", ".txt")
+RASTREADOS = (".py", ".md", ".toml", ".yml", ".cfg", ".txt", ".html", ".css", ".js")
+"""Extensões que a vistoria abre.
+
+`.html`, `.css` e `.js` entraram com a Fase 7, e a razão de terem entrado importa
+mais que a lista: a página é **texto versionado que vai a público**, exatamente
+como os `.py`, e ela guarda CNPJ de exemplo por desenho. Uma varredura de dado
+pessoal que não olha a camada onde os exemplos moram é uma varredura que passa
+verde porque não olhou — que é pior que não existir, porque dá a impressão de
+cobertura.
+
+O `cytoscape.min.js` vendorizado entra na vistoria junto, e **não precisou de
+exceção**: 425 KiB de JavaScript minificado, com sequências longas de dígitos, e
+nenhuma delas valida como CPF. Conferido, e não presumido."""
 
 
 def vistoriados() -> list[Path]:
@@ -108,6 +120,20 @@ def test_nenhum_cpf_valido_fora_dos_sinteticos_declarados() -> None:
         + "\n  ".join(sorted(intrusos))
         + "\nSe veio do arquivo da Receita, ele não entra: gere um sintético."
     )
+
+
+def test_a_vistoria_alcanca_a_camada_da_pagina() -> None:
+    """A Fase 7 acrescentou uma classe inteira de arquivo versionado.
+
+    Sem esta asserção, `RASTREADOS` volta a não citar `.js` numa limpeza de lista
+    e o teste principal continua verde — porque deixou de olhar, e não porque
+    achou tudo limpo. É a mesma diferença entre passar e passar por vacuidade.
+    """
+    vistos = {caminho.name for caminho in vistoriados()}
+
+    assert "app.js" in vistos, "o renderizador guarda os CNPJ de exemplo"
+    assert "index.html" in vistos
+    assert "cytoscape.min.js" in vistos, "o vendorizado é vistoriado como qualquer outro"
 
 
 def test_o_vistoriador_sabe_achar(tmp_path: Path) -> None:
