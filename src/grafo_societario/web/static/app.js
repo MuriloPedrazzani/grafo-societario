@@ -231,9 +231,6 @@ function cartaoDoCaminho(corpo) {
     });
     caixa.appendChild(botao);
   }
-  if (corpo.caminho && corpo.caminho.length) {
-    caixa.appendChild(listaDeNos(corpo.caminho));
-  }
   return caixa;
 }
 
@@ -293,19 +290,25 @@ function cartaoDaVizinhanca(corpo) {
       )
     );
   }
-  caixa.appendChild(listaDeNos(corpo.nos));
   return caixa;
 }
 
-function listaDeNos(nos) {
-  const lista = elemento("ol", "caminho");
+// A lista mora **dentro da figura**, e não no cartão.
+//
+// Ela é a alternativa textual do desenho — mesma informação, para quem lê em vez
+// de olhar —, então pertence ao mesmo elemento. E a ordem de leitura passa a ser
+// a certa: o que aconteceu, a figura, os detalhes. Antes eram 428 px de lista
+// entre o título e o desenho, o que empurrava a figura para fora da tela em
+// qualquer janela normal.
+function preencherLista(nos) {
+  const lista = alvo("lista");
+  lista.replaceChildren();
   for (const no of nos) {
     const item = elemento("li", `no no-${no.tipo}`);
     item.appendChild(elemento("span", "nome", no.nome || no.rotulo || "—"));
     item.appendChild(elemento("span", "detalhe", detalheDoNo(no)));
     lista.appendChild(item);
   }
-  return lista;
 }
 
 function detalheDoNo(no) {
@@ -337,11 +340,12 @@ function esconderDesenho() {
   }
 }
 
-function mostrarDesenho(elementos) {
+function mostrarDesenho(elementos, nos) {
   if (!elementos.length) {
     esconderDesenho();
     return;
   }
+  preencherLista(nos);
   alvo("desenho").hidden = false;
   if (desenhoAtual) desenhoAtual.destroy();
   alvo("detalhe-do-no").textContent = "Clique num nó para ver o nome inteiro.";
@@ -412,10 +416,10 @@ async function consultar() {
     }
     if (modo === "vizinhanca") {
       resultado.appendChild(cartaoDaVizinhanca(corpo));
-      mostrarDesenho(corpo.tem_vinculo ? window.Desenho.elementosDaVizinhanca(corpo) : []);
+      mostrarDesenho(corpo.tem_vinculo ? window.Desenho.elementosDaVizinhanca(corpo) : [], corpo.nos);
     } else {
       resultado.appendChild(cartaoDoCaminho(corpo));
-      mostrarDesenho(window.Desenho.elementosDoCaminho(corpo.caminho || []));
+      mostrarDesenho(window.Desenho.elementosDoCaminho(corpo.caminho || []), corpo.caminho || []);
     }
   } catch (erro) {
     limpar();
