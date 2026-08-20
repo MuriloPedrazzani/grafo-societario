@@ -12,9 +12,67 @@
 
 "use strict";
 
-// Um dos pares curados: varejo de roupas, quatro saltos, com pessoa física no
-// meio. A página abre com ele consultado — formulário vazio é página morta.
-const EXEMPLO = { de: "21.278.675/0001-77", para: "11.844.766/0001-79", profundidade: 10 };
+// Os exemplos, e a inversão que eles carregam.
+//
+// Quase toda demonstração esconde os estados que não são sucesso. Aqui eles são
+// **o achado**, e por isso têm botão próprio: quem clicar nos quatro últimos
+// entende a tese do projeto sem ler uma linha de README — que a maioria das
+// empresas não tem sócio, que a maioria dos pares não se alcança, que quando se
+// alcança não são seis graus, e que existe estrutura que não cabe numa tela.
+//
+// Isso também resolve o problema que abriu a fase: a demonstração deixa de
+// depender de o visitante ter sorte na consulta que digitou.
+//
+// O rótulo diz **o que o exemplo demonstra**, e nunca "exemplo 1": ninguém clica
+// num índice, e o rótulo ensina o vocabulário do projeto de graça.
+//
+// Cada entrada guarda pergunta, nunca resposta. Congelar o resultado faria o
+// exemplo testar a si mesmo, e a página continuaria bonita com a API quebrada.
+const EXEMPLOS = [
+  {
+    rotulo: "Três lojas de roupa em cadeia — 4 saltos",
+    modo: "caminho",
+    de: "21.278.675/0001-77",
+    para: "11.844.766/0001-79",
+    profundidade: 10,
+  },
+  {
+    rotulo: "Vizinhança com ciclo — 10 nós, 3 ligações além da árvore",
+    modo: "vizinhanca",
+    de: "16.704.635/0001-00",
+    profundidade: 2,
+  },
+  {
+    rotulo: "Empresa sem sócio registrado — o caso de 74,8% do recorte",
+    modo: "caminho",
+    de: "31.710.836/0001-03",
+    para: "21.278.675/0001-77",
+    profundidade: 10,
+  },
+  {
+    rotulo: "Duas empresas sem caminho entre elas — o caso de 98,41% dos pares",
+    modo: "caminho",
+    de: "43.378.083/0001-60",
+    para: "04.212.321/0001-00",
+    profundidade: 10,
+  },
+  {
+    rotulo: "Vínculo existe, a 22 saltos — por que não são seis graus",
+    modo: "caminho",
+    de: "19.968.792/0001-10",
+    para: "06.057.252/0001-33",
+    profundidade: 10,
+  },
+  {
+    rotulo: "Empresa grande demais para desenhar — 3.154 vizinhos",
+    modo: "vizinhanca",
+    de: "04.770.650/0001-77",
+    profundidade: 2,
+  },
+];
+
+// A página abre com o primeiro já consultado — formulário vazio é página morta.
+const EXEMPLO = EXEMPLOS[0];
 
 const DISTANCIA_MEDIANA = 20;
 const DEMORA_PARA_AVISAR = 2000;
@@ -35,9 +93,9 @@ const TETO_DA_PAGINA = 150;
 //
 // `tom` separa as duas linguagens visuais da tela: `achado` e `ausencia` são
 // RESPOSTA e usam o mesmo cartão do sucesso; `incerto` é o único "não sei".
-// Nenhum deles é erro — no dado real, 87% dos pares caem em componentes
-// diferentes e 74,8% das empresas não têm sócio. Se a tela só ficasse bonita ao
-// achar caminho curto, ficaria feia quase sempre.
+// Nenhum deles é erro — no dado real, **98,41%** dos pares de nós caem em
+// componentes diferentes e 74,8% das empresas não têm sócio. Se a tela só ficasse
+// bonita ao achar caminho curto, ficaria feia quase sempre.
 const DESFECHOS = {
   encontrado: {
     tom: "achado",
@@ -401,15 +459,23 @@ function faixaDoStatus(resposta, corpo) {
 
 // ------------------------------------------------------------------- modos
 
-function trocarModo(novo) {
+// Ajustar é só a forma; trocar é ajustar e consultar. A separação existe porque
+// um botão de exemplo precisa do ajuste **antes** de preencher os campos, e
+// consultar no meio disso dispararia a consulta com o campo antigo.
+function ajustarModo(novo) {
   modo = novo;
   const vizinhanca = novo === "vizinhanca";
   alvo("bloco-para").hidden = vizinhanca;
   alvo("rotulo-de").textContent = vizinhanca ? "Empresa" : "Empresa de origem";
-  alvo("profundidade").value = vizinhanca ? SALTOS_DA_VIZINHANCA : EXEMPLO.profundidade;
   alvo("modo-caminho").setAttribute("aria-selected", String(!vizinhanca));
   alvo("modo-vizinhanca").setAttribute("aria-selected", String(vizinhanca));
   mostrarErroDeCampo("para", null);
+}
+
+function trocarModo(novo) {
+  ajustarModo(novo);
+  alvo("profundidade").value =
+    novo === "vizinhanca" ? SALTOS_DA_VIZINHANCA : EXEMPLO.profundidade;
   consultar();
 }
 
@@ -427,7 +493,26 @@ async function preencherFaixa() {
   }
 }
 
+function aplicar(exemplo) {
+  ajustarModo(exemplo.modo);
+  alvo("de").value = exemplo.de;
+  if (exemplo.para) alvo("para").value = exemplo.para;
+  alvo("profundidade").value = exemplo.profundidade;
+  consultar();
+}
+
+function montarExemplos() {
+  const caixa = alvo("exemplos");
+  for (const exemplo of EXEMPLOS) {
+    const botao = elemento("button", "exemplo", exemplo.rotulo);
+    botao.type = "button";
+    botao.addEventListener("click", () => aplicar(exemplo));
+    caixa.appendChild(botao);
+  }
+}
+
 function iniciar() {
+  montarExemplos();
   alvo("de").value = EXEMPLO.de;
   alvo("para").value = EXEMPLO.para;
   alvo("profundidade").value = EXEMPLO.profundidade;

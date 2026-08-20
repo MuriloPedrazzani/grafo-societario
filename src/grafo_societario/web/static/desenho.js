@@ -24,6 +24,14 @@
 const ESPACO_DO_CAMINHO = 210;
 const RAIO_DO_ANEL = 165;
 
+// Um caminho de 22 saltos são 23 nós: em linha reta dá 4.620 px, e ajustado à
+// tela vira uma tira ilegível. A linha quebra, e a quebra é **bustrofédon** — a
+// linha ímpar corre ao contrário, então o último nó de uma fica exatamente acima
+// do primeiro da seguinte e a aresta entre eles desce em vez de atravessar o
+// desenho inteiro. Continua sendo a ordem dos saltos, lida como texto.
+const NOS_POR_LINHA = 7;
+const ALTURA_DA_LINHA = 130;
+
 // Truncar é obrigatório: razão social passa de sessenta caracteres com
 // frequência. O nome inteiro fica a um clique, na legenda abaixo da tela.
 const LARGURA_DO_ROTULO = 130;
@@ -84,7 +92,12 @@ function rotuloDoNo(no) {
 }
 
 function posicoesDoCaminho(nos) {
-  return nos.map((_, ordem) => ({ x: ordem * ESPACO_DO_CAMINHO, y: 0 }));
+  return nos.map((_, ordem) => {
+    const linha = Math.floor(ordem / NOS_POR_LINHA);
+    const coluna = ordem % NOS_POR_LINHA;
+    const lugar = linha % 2 === 0 ? coluna : NOS_POR_LINHA - 1 - coluna;
+    return { x: lugar * ESPACO_DO_CAMINHO, y: linha * ALTURA_DA_LINHA };
+  });
 }
 
 function posicoesDaVizinhanca(nos) {

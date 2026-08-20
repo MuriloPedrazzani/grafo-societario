@@ -139,22 +139,69 @@ def test_a_biblioteca_vendorizada_confere_com_a_procedencia() -> None:
     )
 
 
-def test_a_pagina_abre_com_um_exemplo_preenchido() -> None:
-    """Formulário vazio é página morta: o visitante não tem CNPJ na cabeça.
-
-    O CNPJ do exemplo vive no JavaScript e o resultado **não** é embutido em
-    lugar nenhum — congelá-lo faria o exemplo testar a si mesmo, e a página
-    continuaria bonita com a API quebrada.
-    """
+def bloco_dos_exemplos() -> str:
     fonte = APP_JS.read_text(encoding="utf-8")
-    declaracao = next(linha for linha in fonte.splitlines() if linha.startswith("const EXEMPLO"))
+    inicio = fonte.index("const EXEMPLOS = [")
+    return fonte[inicio : fonte.index("\n];", inicio)]
 
-    assert "21.278.675/0001-77" in declaracao
-    assert "11.844.766/0001-79" in declaracao
-    assert set(re.findall(r"(\w+):", declaracao)) == {"de", "para", "profundidade"}, (
-        "o exemplo guarda CNPJ e profundidade, e mais nada: congelar o resultado faria "
-        "a página continuar bonita com a API quebrada"
+
+def test_os_exemplos_guardam_pergunta_e_nunca_resposta() -> None:
+    """Congelar o resultado faria o exemplo testar a si mesmo, e a página
+    continuaria bonita com a API quebrada — a regra vem da curadoria da 6-G."""
+    chaves = set(re.findall(r"^\s{4}(\w+):", bloco_dos_exemplos(), re.MULTILINE))
+
+    assert chaves == {"rotulo", "modo", "de", "para", "profundidade"}, (
+        f"os exemplos guardam {sorted(chaves)}. Só entram pergunta e rótulo: desfecho, "
+        "distância ou qualquer pedaço da resposta faria o exemplo se autoconfirmar."
     )
+
+
+def test_a_pagina_abre_com_um_exemplo_preenchido() -> None:
+    """Formulário vazio é página morta: o visitante não tem CNPJ na cabeça."""
+    fonte = APP_JS.read_text(encoding="utf-8")
+
+    assert "const EXEMPLO = EXEMPLOS[0];" in fonte
+    assert "21.278.675/0001-77" in bloco_dos_exemplos()
+
+
+def test_os_estados_honestos_tem_botao_proprio() -> None:
+    """A inversão desta demonstração: os estados que não são sucesso **são** o
+    achado, e uma demo que só mostra o caminho encontrado esconde a tese.
+
+    Um visitante que clica nos quatro entende o projeto sem ler o README: a
+    maioria das empresas não tem sócio, a maioria dos pares não se alcança,
+    quando se alcança não são seis graus, e há estrutura que não cabe na tela.
+    """
+    bloco = bloco_dos_exemplos()
+
+    for demonstrado in ("74,8%", "98,41%", "22 saltos", "3.154 vizinhos"):
+        assert demonstrado in bloco, f"falta o exemplo que demonstra {demonstrado}"
+
+
+def test_os_rotulos_dizem_o_que_o_exemplo_demonstra() -> None:
+    """ "Exemplo A" não diz nada e ninguém clica. O rótulo carrega o achado, e de
+    quebra ensina o vocabulário do projeto."""
+    rotulos = re.findall(r'rotulo: "([^"]+)"', bloco_dos_exemplos())
+
+    assert len(rotulos) >= 6
+    assert not any(re.fullmatch(r"Exemplo \w+", rotulo) for rotulo in rotulos)
+    assert all(len(rotulo) > 25 for rotulo in rotulos), "rótulo curto demais para dizer algo"
+
+
+def test_o_enquadramento_fica_junto_dos_exemplos(cliente: Any) -> None:
+    """Combinado desde a curadoria: perto dos exemplos, não em rodapé.
+
+    O visitante generaliza a partir de três casos escolhidos a dedo se ninguém
+    disser, onde ele olha, que os casos não são a mensagem.
+    """
+    pagina = " ".join(cliente.get("/").text.split())
+    exemplos = pagina.index("botoes-de-exemplo")
+    enquadramento = pagina.index("Estes exemplos existem para mostrar")
+    resultado_ = pagina.index('id="resultado"')
+
+    assert exemplos < enquadramento < resultado_, "o enquadramento vem antes da resposta"
+    assert "não para mostrar o que o dado significa" in pagina
+    assert "decisão de modelagem" in pagina, "o critério do grau é julgamento, e é dito"
 
 
 def test_a_pagina_nao_gasta_o_limite_de_consultas(grafo_de_exemplo: Config) -> None:  # noqa: F811
