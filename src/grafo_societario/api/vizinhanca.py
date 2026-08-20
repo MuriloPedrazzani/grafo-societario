@@ -77,6 +77,7 @@ from fastapi import APIRouter, Query
 from grafo_societario.api.deps import AcervoDep
 from grafo_societario.api.resolucao import analisar_ou_422, no_da_resposta, resolver
 from grafo_societario.api.schemas import NoDaVizinhanca, RespostaDeVizinhanca
+from grafo_societario.api.texto import milhar
 from grafo_societario.graph.traversal import vizinhanca
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ def consultar_vizinhanca(
 
 
 def _explicar(quantos_nos: int, saltos: int, nivel_recusado: int) -> str:
-    nos = "1 nó" if quantos_nos == 1 else f"{quantos_nos:,} nós"
+    nos = "1 nó" if quantos_nos == 1 else f"{milhar(quantos_nos)} nós"
     ate = (
         "só a própria empresa"
         if saltos == 0
@@ -200,7 +201,8 @@ def _explicar(quantos_nos: int, saltos: int, nivel_recusado: int) -> str:
     )
     if nivel_recusado:
         return (
-            f"{nos}, {ate}. O nível seguinte tem {nivel_recusado:,} nós e **não coube no teto**, "
+            f"{nos}, {ate}. O nível seguinte tem {milhar(nivel_recusado)} nós e **não coube no "
+            "teto**, "
             "então não entrou inteiro: meio nível entregaria um subgrafo que parece completo sem "
             "ser. Aumente teto_de_nos para vê-lo."
         )

@@ -37,6 +37,7 @@ from fastapi import APIRouter, Path
 from grafo_societario.api.deps import AcervoDep
 from grafo_societario.api.resolucao import analisar_ou_422, resolver
 from grafo_societario.api.schemas import RespostaDeEmpresa
+from grafo_societario.api.texto import milhar
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +105,8 @@ def consultar_empresa(
 
 
 def _explicar(vinculos: int, componente: int, no_recorte: bool | None) -> str:
-    quantos = "1 vínculo" if vinculos == 1 else f"{vinculos:,} vínculos"
-    quantos_no = "1 nó" if componente == 1 else f"{componente:,} nós"
+    quantos = "1 vínculo" if vinculos == 1 else f"{milhar(vinculos)} vínculos"
+    quantos_no = "1 nó" if componente == 1 else f"{milhar(componente)} nós"
     frase = (
         f"Empresa com {quantos} no recorte, num componente conexo de {quantos_no}. Os dois "
         "números são piso e não total: só foram ingeridos sócios de empresas cuja matriz está "
