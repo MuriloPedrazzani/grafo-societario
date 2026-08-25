@@ -47,6 +47,7 @@ from test_caminho import grafo_de_exemplo  # noqa: F401
 
 APP_JS = ESTATICOS / "app.js"
 DESENHO_JS = ESTATICOS / "desenho.js"
+ESTILO_CSS = ESTATICOS / "estilo.css"
 VENDORIZADO = ESTATICOS / "vendor" / "cytoscape.min.js"
 PROCEDENCIA = Path(__file__).resolve().parents[1] / "docs" / "dependencias_vendorizadas.md"
 
@@ -136,6 +137,44 @@ def test_os_dois_enquadramentos_usam_a_mesma_margem() -> None:
 
     assert "padding: MARGEM_DO_ENQUADRAMENTO" in fonte
     assert "cy.fit(MARGEM_DO_ENQUADRAMENTO)" in fonte
+
+
+def test_o_teto_da_tela_mora_so_no_css() -> None:
+    """Dois lugares guardando o mesmo número é a falha recorrente da 6-F.
+
+    O teto da tela é o `height` do `.tela`. O JS o lê do contêiner em vez de
+    trazer uma cópia, e a cópia é o que não pode aparecer: mudar o CSS deixaria
+    o JS limitando por um número que não é mais o da tela, sem nada falhar — a
+    altura sairia errada e o desenho continuaria plausível.
+    """
+    css = ESTILO_CSS.read_text(encoding="utf-8")
+    js = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert re.search(r"\.tela\s*\{[^}]*\bheight:", css), (
+        "o `.tela` precisa de `height` no CSS — é de lá que o JS lê o teto"
+    )
+    assert "clientHeight" in js, "o JS tem de ler o teto do contêiner, não guardar cópia"
+    assert "26rem" not in js, "o teto foi copiado para o JS; ele mora só no CSS"
+
+
+def test_a_altura_da_tela_sai_do_conteudo() -> None:
+    """Caminho é largo e baixo; vizinhança é redonda e enche a caixa. Altura fixa
+    servia mal aos dois, e altura fixa por modo cortaria o exemplo de 22 saltos,
+    que quebra em quatro linhas.
+
+    A guarda é contra a regressão silenciosa: sem o piso, um caminho de dois nós
+    espremeria a tela a quase nada; sem os limites de zoom compartilhados, a
+    altura prevista deixaria de corresponder à escala que o `fit` escolhe.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "ALTURA_MINIMA_DA_TELA" in fonte, "sem piso, o caminho curto colapsa a tela"
+    assert "ZOOM_MINIMO" in fonte and "ZOOM_MAXIMO" in fonte, (
+        "a escala prevista tem de usar os mesmos limites que o `fit` aplica"
+    )
+    assert "minZoom: ZOOM_MINIMO" in fonte and "maxZoom: ZOOM_MAXIMO" in fonte, (
+        "os limites do Cytoscape e os do cálculo da altura têm de ser o mesmo número"
+    )
 
 
 def test_a_guarda_de_fronteira_sabe_reprovar() -> None:

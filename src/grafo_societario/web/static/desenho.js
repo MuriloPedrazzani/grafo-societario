@@ -29,6 +29,18 @@ const RAIO_DO_ANEL = 165;
 // e os dois têm de usar o mesmo número.
 const MARGEM_DO_ENQUADRAMENTO = 34;
 
+// Os limites de zoom do Cytoscape. Saem daqui porque a altura derivada precisa
+// prever a escala que o `fit` vai escolher, e prever com limite diferente do
+// que o `fit` aplica dá altura que não corresponde ao desenho.
+const ZOOM_MINIMO = 0.2;
+const ZOOM_MAXIMO = 2.5;
+
+// O piso da tela. O teto **não** mora aqui: mora no `height` do `.tela` no CSS,
+// e é lido de lá. Abaixo deste piso a caixa deixa de parecer área de desenho e
+// a linha de detalhe do nó fica sem folga; acima de ~60 px de sobra por lado o
+// caminho curto já respira.
+const ALTURA_MINIMA_DA_TELA = 176;
+
 // Um caminho de 22 saltos são 23 nós: em linha reta dá 4.620 px, e ajustado à
 // tela vira uma tira ilegível. A linha quebra, e a quebra é **bustrofédon** — a
 // linha ímpar corre ao contrário, então o último nó de uma fica exatamente acima
@@ -203,6 +215,57 @@ function elementosDaVizinhanca(corpo) {
 // tamanho desfaria o zoom e o pan que o visitante escolheu ao redimensionar a
 // janela — o desenho não se reorganiza sozinho, pela mesma razão que
 // `autoungrabify` está ligado.
+// A tela tinha altura fixa, e caminho é desenho largo e baixo: os cinco nós do
+// exemplo ocupam 46 px dentro de 416, o que deixa **185 px mortos em cima e 185
+// embaixo**. Medido, o conteúdo está centrado com 1 px de erro — não era
+// enquadramento errado, era caixa grande demais para o que entra nela. Numa
+// imagem de topo de README, faixa morta grande lê-se como falha de renderização
+// em vez de "um caminho é largo e baixo".
+//
+// A altura passa a sair do conteúdo, como as posições já saem desde o commit 39.
+// Altura fixa menor só no modo caminho não serviria: o exemplo de 22 saltos
+// quebra em quatro linhas de bustrofédon e precisa de mais que o caminho de 5.
+//
+// **Por que em duas passadas.** A altura em pixels é a caixa envolvente vezes a
+// escala, e a escala vem da largura — que inclui a dos rótulos, que depende da
+// métrica do texto. Medido no caminho de exemplo, a sobra do rótulo vai de 5 px
+// (`Sócio 2`) a 86 px (razão social truncada no `text-max-width`) no mesmo
+// desenho: não sai do número de nós nem da profundidade. Calculá-la aqui seria
+// reimplementar a medição de texto do Cytoscape, e duas implementações do mesmo
+// cálculo divergem no commit em que ninguém olha — a mesma razão que mantém o
+// dígito verificador do CNPJ só no servidor.
+//
+// A primeira passada é **medição, não rascunho**: as duas rodam dentro da mesma
+// tarefa, antes de o navegador compor qualquer quadro, então não há estado
+// intermediário para o visitante ver e não há o que esconder. Quando a largura é
+// que manda, o zoom da primeira já é o final; a segunda só recentra na altura
+// nova.
+function ajustarAlturaAoConteudo(cy, container) {
+  // O teto mora no CSS e já vale aqui: `desenhar` limpa a altura inline antes
+  // de o Cytoscape medir. Limpá-la só agora faria o init medir a altura do
+  // desenho ANTERIOR, e o retorno antecipado abaixo pularia o `fit` — que é o
+  // mesmo "resize sem fit" que a guarda de área existe para consertar.
+  const alturaMaxima = container.clientHeight;
+  const larguraUtil = container.clientWidth - 2 * MARGEM_DO_ENQUADRAMENTO;
+  const caixa = cy.elements().boundingBox();
+  if (larguraUtil <= 0 || caixa.w <= 0 || caixa.h <= 0) return;
+
+  // Os mesmos limites que o `fit` aplica, senão a altura prevista não
+  // corresponde à escala escolhida.
+  const escala = Math.min(ZOOM_MAXIMO, Math.max(ZOOM_MINIMO, larguraUtil / caixa.w));
+  const desejada = caixa.h * escala + 2 * MARGEM_DO_ENQUADRAMENTO;
+  const altura = Math.round(
+    Math.min(alturaMaxima, Math.max(ALTURA_MINIMA_DA_TELA, desejada)),
+  );
+  // A vizinhança é redonda e enche a caixa: bate no teto e nada muda, e aí a
+  // segunda passada seria trabalho para chegar ao mesmo lugar.
+  if (altura === alturaMaxima) return;
+
+  container.style.height = `${altura}px`;
+  cy.resize();
+  cy.fit(MARGEM_DO_ENQUADRAMENTO);
+}
+
 function semArea(container) {
   return container.clientWidth === 0 || container.clientHeight === 0;
 }
@@ -222,6 +285,11 @@ function reenquadrarSeNasceuSemArea(cy, container) {
 }
 
 function desenhar(container, elementos, aoClicarNoNo) {
+  // A altura deixada pelo desenho anterior não pode contaminar a medição deste:
+  // volta ao teto do CSS **antes** de o Cytoscape medir o contêiner. Sem isto, a
+  // vizinhança que vem depois de um caminho nasce enquadrada contra 176 px e sai
+  // com o zoom clampado no mínimo.
+  container.style.height = "";
   const cy = cytoscape({
     container,
     elements: elementos,
@@ -232,10 +300,11 @@ function desenhar(container, elementos, aoClicarNoNo) {
     layout: { name: "preset", fit: true, padding: MARGEM_DO_ENQUADRAMENTO },
     // O visitante navega; o desenho não se reorganiza sozinho.
     autoungrabify: true,
-    minZoom: 0.2,
-    maxZoom: 2.5,
+    minZoom: ZOOM_MINIMO,
+    maxZoom: ZOOM_MAXIMO,
   });
   cy.on("tap", "node", (evento) => aoClicarNoNo(evento.target.data("detalhe")));
+  ajustarAlturaAoConteudo(cy, container);
   reenquadrarSeNasceuSemArea(cy, container);
   return cy;
 }
