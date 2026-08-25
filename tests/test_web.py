@@ -88,6 +88,56 @@ def test_o_desenho_conhece_todos_os_tipos_de_no() -> None:
     assert not ausentes, f"o desenho não distingue {', '.join(ausentes)}"
 
 
+def test_o_desenho_se_reenquadra_se_nascer_sem_area() -> None:
+    """O Cytoscape mede o contêiner uma vez, no `cytoscape()`, e guarda em cache;
+    o `fit` do `preset` calcula zoom e pan a partir dessa medida.
+
+    Sem área nesse instante o enquadramento nasce degenerado e não se recupera:
+    medido, o `autoResize` chama `resize()`, que conserta o canvas e deixa o
+    zoom onde estava; **só `fit()` recupera**.
+
+    A guarda existe porque a recuperação é podável sem parecer que se perdeu
+    nada: trocar o `fit()` por `resize()` numa limpeza pareceria equivalente,
+    passaria em qualquer revisão, e devolveria o desenho quebrado sem erro.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "ResizeObserver" in fonte, "sem observador, o desenho nunca sabe que ganhou área"
+    assert "cy.fit(" in fonte, (
+        "resize() sozinho não refaz o enquadramento — sem fit() não há recuperação"
+    )
+    assert "disconnect()" in fonte, (
+        "o observador tem de largar o contêiner quando o desenho é destruído"
+    )
+
+
+def test_a_guarda_do_enquadramento_olha_os_dois_eixos() -> None:
+    """Degenerar tem assinatura diferente por eixo: largura 0 dá `zoom 1` com
+    pan (0,0); altura 0 dá o zoom clampado no `minZoom`.
+
+    A primeira versão desta guarda só olhava a largura, e a segunda assinatura
+    — que foi a que apareceu por acidente durante a investigação — passaria por
+    ela sem ser vista. Um eixo só é meia guarda.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "clientWidth === 0" in fonte, "a guarda tem de reconhecer largura degenerada"
+    assert "clientHeight === 0" in fonte, "a guarda tem de reconhecer altura degenerada"
+
+
+def test_os_dois_enquadramentos_usam_a_mesma_margem() -> None:
+    """São dois lugares que enquadram: o `preset` ao nascer e o reenquadramento.
+
+    Com números diferentes, o desenho recuperado teria folga diferente do que
+    nasceu certo — e a diferença só apareceria na rota que quase ninguém
+    percorre, que é exatamente onde ninguém olha.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "padding: MARGEM_DO_ENQUADRAMENTO" in fonte
+    assert "cy.fit(MARGEM_DO_ENQUADRAMENTO)" in fonte
+
+
 def test_a_guarda_de_fronteira_sabe_reprovar() -> None:
     """Controle positivo: uma guarda que só compara strings passa fácil demais.
 

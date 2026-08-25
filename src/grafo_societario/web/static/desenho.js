@@ -24,6 +24,11 @@
 const ESPACO_DO_CAMINHO = 210;
 const RAIO_DO_ANEL = 165;
 
+// A folga entre o desenho e a borda da tela. Sai daqui porque o enquadramento
+// é feito em dois lugares — no `preset` ao nascer e no reenquadramento abaixo —
+// e os dois têm de usar o mesmo número.
+const MARGEM_DO_ENQUADRAMENTO = 34;
+
 // Um caminho de 22 saltos são 23 nós: em linha reta dá 4.620 px, e ajustado à
 // tela vira uma tira ilegível. A linha quebra, e a quebra é **bustrofédon** — a
 // linha ímpar corre ao contrário, então o último nó de uma fica exatamente acima
@@ -170,6 +175,52 @@ function elementosDaVizinhanca(corpo) {
   return [...nos, ...arestas];
 }
 
+// O Cytoscape mede o contêiner **uma vez**, no `cytoscape()`, e guarda em
+// cache; o `fit` do `preset` calcula zoom e pan a partir dessa medida. Se o
+// contêiner não tiver área nesse instante, o enquadramento nasce degenerado e
+// **não se recupera sozinho**. Medido, nesta ordem, com a `desenhar` real:
+//
+//     init com largura 0        zoom 1      largura 0
+//     evento `resize`           zoom 1      largura 862   <- autoResize
+//     cy.resize()               zoom 1      largura 862
+//     cy.fit()                  zoom 0,89   largura 862
+//
+// O `autoResize` conserta o canvas e **não** refaz o enquadramento: sobra um
+// canvas do tamanho certo com o zoom e o pan de um canvas sem área. Sem erro e
+// sem aviso, que é a família de falha que este projeto persegue.
+//
+// **Esta rota não foi reproduzida em navegador de visitante.** Ela apareceu no
+// painel de navegador do agente, que não faz layout em aba oculta; o Chrome
+// faz, devolve a largura verdadeira, e ali o desenho nasceu enquadrado — em
+// duas abas abertas com clique do meio, que é o caminho suspeito. A guarda fica
+// como defesa, não como correção de defeito observado.
+//
+// Os dois eixos entram porque a degeneração tem assinatura diferente em cada
+// um: largura 0 dá `zoom 1` com pan (0,0), e altura 0 dá o zoom clampado no
+// `minZoom`. Cobrir só a largura deixaria metade do caso de fora.
+//
+// Arma só quando o nascimento foi degenerado. Reenquadrar a cada mudança de
+// tamanho desfaria o zoom e o pan que o visitante escolheu ao redimensionar a
+// janela — o desenho não se reorganiza sozinho, pela mesma razão que
+// `autoungrabify` está ligado.
+function semArea(container) {
+  return container.clientWidth === 0 || container.clientHeight === 0;
+}
+
+function reenquadrarSeNasceuSemArea(cy, container) {
+  if (!semArea(container) || typeof ResizeObserver === "undefined") return;
+  const observador = new ResizeObserver(() => {
+    if (cy.destroyed() || semArea(container)) return;
+    observador.disconnect();
+    cy.resize();
+    cy.fit(MARGEM_DO_ENQUADRAMENTO);
+  });
+  observador.observe(container);
+  // A consulta seguinte destrói este `cy`; o observador tem de ir junto, senão
+  // fica segurando um contêiner que já não é o dele.
+  cy.on("destroy", () => observador.disconnect());
+}
+
 function desenhar(container, elementos, aoClicarNoNo) {
   const cy = cytoscape({
     container,
@@ -178,13 +229,14 @@ function desenhar(container, elementos, aoClicarNoNo) {
     // `preset` usa as posições que já calculamos. Nenhum layout iterativo roda,
     // então não há semente, não há animação de acomodação e não há variação
     // entre carregamentos.
-    layout: { name: "preset", fit: true, padding: 34 },
+    layout: { name: "preset", fit: true, padding: MARGEM_DO_ENQUADRAMENTO },
     // O visitante navega; o desenho não se reorganiza sozinho.
     autoungrabify: true,
     minZoom: 0.2,
     maxZoom: 2.5,
   });
   cy.on("tap", "node", (evento) => aoClicarNoNo(evento.target.data("detalhe")));
+  reenquadrarSeNasceuSemArea(cy, container);
   return cy;
 }
 
