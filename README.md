@@ -288,7 +288,11 @@ Previsto: `Docker` (Fase 8)
 
 ## Reprodução
 
-Aquisição, bronze, silver, grafo, busca e API já funcionam ponta a ponta. A página web chega na Fase 7.
+Aquisição, bronze, silver, grafo, busca, API e página web funcionam ponta a ponta.
+
+As dependências são separadas pelo que cada uma serve: o conjunto base é só o que **responde consulta**, o extra `cli` traz a interface de linha de comando e o cliente HTTP da Receita, e o extra `build` traz o motor de ETL e o rotulador de componentes. A imagem de deploy instala apenas o base — é o que a mantém sem DuckDB nem SciPy, e o que faz o empacotamento concordar com o teste que já exigia essa fronteira no nível de import.
+
+Para desenvolver, `dev` inclui os dois extras e o comando é o mesmo de sempre:
 
 ```bash
 pip install -e ".[dev]"
