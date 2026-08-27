@@ -125,7 +125,13 @@ def test_mesmo_no_tem_zero_saltos(corrente: tuple[Grafo, Any]) -> None:
 
 
 def test_componentes_diferentes_respondem_sem_percorrer(corrente: tuple[Grafo, Any]) -> None:
-    """A resposta mais barata, e a mais comum: 87% dos pares caem aqui."""
+    """A resposta mais barata, e a mais comum: **98,41%** dos pares caem aqui.
+
+    O número não é o 87,39% de nós fora do maior componente — são afirmações
+    diferentes, e esta docstring conflava as duas. Sobre pares, a conta é
+    `Σcᵢ²/n²` sobre os tamanhos de componente: 1,59% de chance de um par
+    aleatório se alcançar.
+    """
     grafo, componentes = corrente
 
     caminho = buscar_caminho(grafo, componentes, 0, 5, SEM_LIMITE)

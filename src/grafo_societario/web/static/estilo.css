@@ -1,0 +1,311 @@
+/* Uma folha, sem build. O acabamento importa: esta página é o marco público. */
+
+:root {
+  --tinta: #16181d;
+  --tinta-fraca: #5a6270;
+  --fundo: #fbfbfc;
+  --papel: #ffffff;
+  --borda: #e3e6ea;
+  --realce: #1c5d99;
+  --achado: #0f7b6c;
+  --ausencia: #6b7280;
+  --incerto: #a15c00;
+  --problema: #a3232c;
+  --curva: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tinta: #e8eaed;
+    --tinta-fraca: #9aa3b0;
+    --fundo: #14161a;
+    --papel: #1b1e24;
+    --borda: #2b3038;
+    --realce: #6aa9e0;
+    --achado: #4cbfab;
+    --ausencia: #9aa3b0;
+    --incerto: #d99a3c;
+    --problema: #e07a82;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2.5rem 1.25rem 4rem;
+  background: var(--fundo);
+  color: var(--tinta);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.topo, main, .rodape { max-width: 54rem; margin: 0 auto; }
+
+h1 { font-size: 1.9rem; margin: 0 0 .4rem; letter-spacing: -.02em; }
+
+.chamada { margin: 0 0 .9rem; color: var(--tinta-fraca); max-width: 42rem; }
+
+.faixa {
+  margin: 0 0 2rem;
+  font-variant-numeric: tabular-nums;
+  font-size: .87rem;
+  color: var(--tinta-fraca);
+  border-left: 3px solid var(--borda);
+  padding-left: .75rem;
+}
+
+/* ----------------------------------------------------------------- modos */
+
+.modos { display: flex; gap: .4rem; margin-bottom: .8rem; }
+
+.modo {
+  background: transparent;
+  color: var(--tinta-fraca);
+  border: 1px solid var(--borda);
+  font-weight: 500;
+  padding: .42rem .9rem;
+}
+
+.modo[aria-selected="true"] {
+  background: var(--papel);
+  color: var(--tinta);
+  border-color: var(--realce);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------ formulário */
+
+.consulta {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: .85rem;
+  align-items: end;
+  padding: 1.15rem;
+  background: var(--papel);
+  border: 1px solid var(--borda);
+  border-radius: var(--curva);
+}
+
+@media (max-width: 40rem) {
+  .consulta { grid-template-columns: 1fr; align-items: stretch; }
+}
+
+.campo { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+.campo-estreito { max-width: 6rem; }
+
+label { font-size: .8rem; font-weight: 600; color: var(--tinta-fraca); }
+
+input {
+  padding: .55rem .65rem;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color: var(--tinta);
+  background: var(--fundo);
+  border: 1px solid var(--borda);
+  border-radius: 7px;
+}
+
+input:focus-visible { outline: 2px solid var(--realce); outline-offset: 1px; }
+input[aria-invalid="true"] { border-color: var(--problema); }
+
+.erro-do-campo { margin: 0; font-size: .8rem; color: var(--problema); }
+
+button {
+  padding: .58rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--realce);
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: .55; cursor: progress; }
+
+/* --------------------------------------------------------------- exemplos */
+
+.exemplos { margin-top: 1.6rem; }
+
+.exemplos h2 {
+  margin: 0 0 .6rem;
+  font-size: .82rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--tinta-fraca);
+}
+
+.botoes-de-exemplo { display: flex; flex-wrap: wrap; gap: .45rem; }
+
+.exemplo {
+  background: var(--papel);
+  color: var(--tinta);
+  border: 1px solid var(--borda);
+  border-radius: 999px;
+  font-size: .85rem;
+  font-weight: 500;
+  padding: .4rem .85rem;
+  text-align: left;
+}
+
+.exemplo:hover { border-color: var(--realce); filter: none; }
+
+.enquadramento {
+  margin-top: 1rem;
+  padding: .9rem 1.1rem;
+  border: 1px dashed var(--borda);
+  border-radius: var(--curva);
+  font-size: .86rem;
+  color: var(--tinta-fraca);
+}
+
+.enquadramento p { margin: 0 0 .7rem; }
+.enquadramento p:last-child { margin-bottom: 0; }
+.enquadramento strong { color: var(--tinta); }
+
+/* ------------------------------------------- resposta: cartão, sempre igual */
+
+.resultado { margin: 1.5rem 0 0; min-height: 9rem; }
+
+.carregando { color: var(--tinta-fraca); font-style: italic; }
+
+.cartao {
+  padding: 1.25rem 1.35rem;
+  background: var(--papel);
+  border: 1px solid var(--borda);
+  border-left: 4px solid var(--ausencia);
+  border-radius: var(--curva);
+}
+
+.cartao-achado { border-left-color: var(--achado); }
+.cartao-ausencia { border-left-color: var(--ausencia); }
+.cartao-incerto { border-left-color: var(--incerto); }
+
+.selo {
+  margin: 0 0 .35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .74rem;
+  letter-spacing: .04em;
+  color: var(--tinta-fraca);
+}
+
+.cartao .titulo { margin: 0 0 .5rem; font-size: 1.3rem; letter-spacing: -.01em; }
+.cartao .explicacao { margin: 0; }
+.cartao .contexto {
+  margin: .7rem 0 0;
+  font-size: .9rem;
+  color: var(--tinta-fraca);
+  border-top: 1px solid var(--borda);
+  padding-top: .7rem;
+}
+
+.acao { margin-top: 1rem; }
+
+/* ------------------------------------------------------------- o caminho */
+
+.caminho { margin: 1.1rem 0 0; padding: 0 0 0 1.4rem; }
+
+.no { margin-bottom: .55rem; }
+.no .nome { display: block; font-weight: 600; }
+.no .detalhe {
+  display: block;
+  font-size: .82rem;
+  color: var(--tinta-fraca);
+  font-variant-numeric: tabular-nums;
+}
+.no-pessoa_fisica .nome, .no-estrangeiro .nome { font-style: italic; color: var(--tinta-fraca); }
+
+/* --------------------------------------------- problema: faixa, outra cara */
+
+.problema {
+  padding: 1rem 1.2rem;
+  background: color-mix(in srgb, var(--problema) 7%, var(--papel));
+  border: 1px solid color-mix(in srgb, var(--problema) 32%, var(--borda));
+  border-radius: var(--curva);
+}
+
+.problema .titulo { margin: 0 0 .4rem; font-size: 1.05rem; color: var(--problema); }
+.problema .explicacao { margin: 0; font-size: .92rem; }
+.problema .codigo {
+  margin: .6rem 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .8rem;
+  color: var(--tinta-fraca);
+}
+
+/* ------------------------------------------------------------- o desenho */
+
+.desenho { margin: 1.25rem 0 0; }
+
+.tela {
+  height: 26rem;
+  background: var(--papel);
+  border: 1px solid var(--borda);
+  border-radius: var(--curva);
+}
+
+.desenho figcaption { margin-top: .7rem; }
+
+.detalhe-do-no {
+  margin: 0 0 .6rem;
+  font-size: .87rem;
+  color: var(--tinta-fraca);
+  font-variant-numeric: tabular-nums;
+  min-height: 1.4em;
+}
+
+.legenda {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem 1.1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: .8rem;
+  color: var(--tinta-fraca);
+}
+
+.legenda li { display: flex; align-items: center; gap: .4rem; }
+
+.marca {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border: 2px solid #5a6270;
+  background: #c9d4e2;
+}
+
+.marca-pj { border-radius: 3px; }
+.marca-pf { border-radius: 50%; background: #e8e2f2; }
+.marca-estrangeiro { background: #f2e6d8; transform: rotate(45deg); }
+.marca-conector { border-style: dashed; border-color: var(--incerto); border-radius: 3px; }
+
+/* ------------------------------------------------------------------ resto */
+
+.cru { margin: 2rem 0 0; font-size: .9rem; color: var(--tinta-fraca); }
+.cru summary { cursor: pointer; }
+.cru .nota { margin: .6rem 0; font-size: .85rem; }
+
+pre {
+  overflow-x: auto;
+  padding: .9rem;
+  background: var(--papel);
+  border: 1px solid var(--borda);
+  border-radius: 7px;
+  font-size: .82rem;
+  line-height: 1.45;
+}
+
+a { color: var(--realce); }
+
+.rodape {
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--borda);
+  font-size: .84rem;
+  color: var(--tinta-fraca);
+}
+
+.rodape p { margin: 0 0 .6rem; }

@@ -34,7 +34,7 @@ from typing import Any
 from fastapi import Depends, FastAPI
 
 from grafo_societario import __version__
-from grafo_societario.api import caminho, empresa, vizinhanca
+from grafo_societario.api import caminho, empresa, vizinhanca, web
 from grafo_societario.api.deps import AcervoDep, ciclo
 from grafo_societario.api.erros import registrar_tratadores
 from grafo_societario.api.limite import limitar
@@ -61,6 +61,9 @@ def criar_aplicacao(config: Config | None = None) -> FastAPI:
     app.include_router(caminho.roteador, dependencies=consulta)
     app.include_router(vizinhanca.roteador, dependencies=consulta)
     app.include_router(empresa.roteador, dependencies=consulta)
+    # A página e os estáticos também ficam fora do limitador: o visitante
+    # gastaria o balde carregando a própria página.
+    web.montar(app)
 
     @app.get("/health", tags=["operação"])
     def health(acervo: AcervoDep) -> dict[str, Any]:

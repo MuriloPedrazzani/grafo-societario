@@ -1,0 +1,335 @@
+"""A página servida pela própria API, e a guarda que atravessa a linguagem.
+
+## O renderizador não tem regressão automatizada, e isso é escolha
+
+Não há vitest, jest nem navegador headless neste projeto. Acrescentar um
+ecossistema de JavaScript a um projeto Python, para uma página sem etapa de
+build, seria ferramenta por ferramenta — e a regra deste repositório é que cada
+componente justifique a própria existência.
+
+O que torna a escolha defensável é onde a semântica mora. `desfecho`,
+`afirma_ausencia` e `explicacao` são decididos e testados **no servidor**; o
+JavaScript só escolhe título, tom e ação. Um renderizador sem regra de negócio
+erra na aparência, e aparência se confere olhando.
+
+**Mas alguém vai perguntar, então está dito:** os dez estados da tela são
+verificados dirigindo o navegador à mão, e não por teste automatizado. O que
+existe automatizado é a guarda abaixo.
+
+## A guarda de fronteira
+
+`test_a_pagina_conhece_todos_os_desfechos` lê o arquivo `.js` e exige que os
+cinco valores de `DesfechoDaConsulta` apareçam nele. É comparação de string, é
+feia, e é a única coisa entre "a API ganhou um desfecho" e "a página renderiza
+sem tratamento para ele".
+
+É o `assert_never` do commit 34 atravessando a borda da linguagem: o mypy garante
+que o Python trata os cinco, e isto garante que a página os conhece. Sem ela, o
+commit que acrescentar um desfecho passa verde e quebra a demonstração.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from grafo_societario.api.main import criar_aplicacao
+from grafo_societario.api.schemas import DesfechoDaConsulta
+from grafo_societario.api.web import ESTATICOS, PAGINA
+from grafo_societario.config import Config
+from grafo_societario.graph.catalogo import TIPOS
+from test_caminho import grafo_de_exemplo  # noqa: F401
+
+APP_JS = ESTATICOS / "app.js"
+DESENHO_JS = ESTATICOS / "desenho.js"
+ESTILO_CSS = ESTATICOS / "estilo.css"
+VENDORIZADO = ESTATICOS / "vendor" / "cytoscape.min.js"
+PROCEDENCIA = Path(__file__).resolve().parents[1] / "docs" / "dependencias_vendorizadas.md"
+
+
+@pytest.fixture
+def cliente(grafo_de_exemplo: Config) -> Any:  # noqa: F811
+    with TestClient(criar_aplicacao(grafo_de_exemplo)) as aberto:
+        yield aberto
+
+
+# ------------------------------------------- a fronteira entre Python e JavaScript
+
+
+def test_a_pagina_conhece_todos_os_desfechos() -> None:
+    """O `assert_never` do commit 34, atravessando a borda da linguagem.
+
+    O mypy recusa o commit que acrescentar um desfecho sem tratá-lo no Python.
+    Nada, do lado de cá, impediria a página de continuar com os cinco antigos —
+    ela renderizaria o desfecho novo sem título, sem tom e sem ação, e a suíte
+    ficaria verde.
+    """
+    fonte = APP_JS.read_text(encoding="utf-8")
+
+    ausentes = [desfecho.value for desfecho in DesfechoDaConsulta if desfecho.value not in fonte]
+
+    assert not ausentes, (
+        f"a página não conhece {', '.join(ausentes)}. A API ganhou desfecho novo e o "
+        f"renderizador não foi atualizado — {APP_JS.name} precisa tratá-lo."
+    )
+
+
+def test_o_desenho_conhece_todos_os_tipos_de_no() -> None:
+    """A mesma guarda, para os três tipos: forma distinta por tipo é promessa da
+    legenda, e um tipo novo sairia com a forma padrão sem nada falhar."""
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    ausentes = [tipo for tipo in TIPOS if tipo not in fonte]
+
+    assert not ausentes, f"o desenho não distingue {', '.join(ausentes)}"
+
+
+def test_o_desenho_se_reenquadra_se_nascer_sem_area() -> None:
+    """O Cytoscape mede o contêiner uma vez, no `cytoscape()`, e guarda em cache;
+    o `fit` do `preset` calcula zoom e pan a partir dessa medida.
+
+    Sem área nesse instante o enquadramento nasce degenerado e não se recupera:
+    medido, o `autoResize` chama `resize()`, que conserta o canvas e deixa o
+    zoom onde estava; **só `fit()` recupera**.
+
+    A guarda existe porque a recuperação é podável sem parecer que se perdeu
+    nada: trocar o `fit()` por `resize()` numa limpeza pareceria equivalente,
+    passaria em qualquer revisão, e devolveria o desenho quebrado sem erro.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "ResizeObserver" in fonte, "sem observador, o desenho nunca sabe que ganhou área"
+    assert "cy.fit(" in fonte, (
+        "resize() sozinho não refaz o enquadramento — sem fit() não há recuperação"
+    )
+    assert "disconnect()" in fonte, (
+        "o observador tem de largar o contêiner quando o desenho é destruído"
+    )
+
+
+def test_a_guarda_do_enquadramento_olha_os_dois_eixos() -> None:
+    """Degenerar tem assinatura diferente por eixo: largura 0 dá `zoom 1` com
+    pan (0,0); altura 0 dá o zoom clampado no `minZoom`.
+
+    A primeira versão desta guarda só olhava a largura, e a segunda assinatura
+    — que foi a que apareceu por acidente durante a investigação — passaria por
+    ela sem ser vista. Um eixo só é meia guarda.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "clientWidth === 0" in fonte, "a guarda tem de reconhecer largura degenerada"
+    assert "clientHeight === 0" in fonte, "a guarda tem de reconhecer altura degenerada"
+
+
+def test_os_dois_enquadramentos_usam_a_mesma_margem() -> None:
+    """São dois lugares que enquadram: o `preset` ao nascer e o reenquadramento.
+
+    Com números diferentes, o desenho recuperado teria folga diferente do que
+    nasceu certo — e a diferença só apareceria na rota que quase ninguém
+    percorre, que é exatamente onde ninguém olha.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "padding: MARGEM_DO_ENQUADRAMENTO" in fonte
+    assert "cy.fit(MARGEM_DO_ENQUADRAMENTO)" in fonte
+
+
+def test_o_teto_da_tela_mora_so_no_css() -> None:
+    """Dois lugares guardando o mesmo número é a falha recorrente da 6-F.
+
+    O teto da tela é o `height` do `.tela`. O JS o lê do contêiner em vez de
+    trazer uma cópia, e a cópia é o que não pode aparecer: mudar o CSS deixaria
+    o JS limitando por um número que não é mais o da tela, sem nada falhar — a
+    altura sairia errada e o desenho continuaria plausível.
+    """
+    css = ESTILO_CSS.read_text(encoding="utf-8")
+    js = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert re.search(r"\.tela\s*\{[^}]*\bheight:", css), (
+        "o `.tela` precisa de `height` no CSS — é de lá que o JS lê o teto"
+    )
+    assert "clientHeight" in js, "o JS tem de ler o teto do contêiner, não guardar cópia"
+    assert "26rem" not in js, "o teto foi copiado para o JS; ele mora só no CSS"
+
+
+def test_a_altura_da_tela_sai_do_conteudo() -> None:
+    """Caminho é largo e baixo; vizinhança é redonda e enche a caixa. Altura fixa
+    servia mal aos dois, e altura fixa por modo cortaria o exemplo de 22 saltos,
+    que quebra em quatro linhas.
+
+    A guarda é contra a regressão silenciosa: sem o piso, um caminho de dois nós
+    espremeria a tela a quase nada; sem os limites de zoom compartilhados, a
+    altura prevista deixaria de corresponder à escala que o `fit` escolhe.
+    """
+    fonte = DESENHO_JS.read_text(encoding="utf-8")
+
+    assert "ALTURA_MINIMA_DA_TELA" in fonte, "sem piso, o caminho curto colapsa a tela"
+    assert "ZOOM_MINIMO" in fonte and "ZOOM_MAXIMO" in fonte, (
+        "a escala prevista tem de usar os mesmos limites que o `fit` aplica"
+    )
+    assert "minZoom: ZOOM_MINIMO" in fonte and "maxZoom: ZOOM_MAXIMO" in fonte, (
+        "os limites do Cytoscape e os do cálculo da altura têm de ser o mesmo número"
+    )
+
+
+def test_a_guarda_de_fronteira_sabe_reprovar() -> None:
+    """Controle positivo: uma guarda que só compara strings passa fácil demais.
+
+    Se ela não reprovasse um desfecho ausente, seria uma linha verde permanente
+    dando a impressão de cobertura.
+    """
+    fonte = APP_JS.read_text(encoding="utf-8")
+
+    assert "desfecho_que_nao_existe" not in fonte
+
+
+# ------------------------------------------------------- a página é servida daqui
+
+
+def test_a_raiz_devolve_a_pagina(cliente: Any) -> None:
+    resposta = cliente.get("/")
+
+    assert resposta.status_code == 200
+    assert resposta.headers["content-type"].startswith("text/html")
+    assert "Grafo Societário" in resposta.text
+
+
+@pytest.mark.parametrize(
+    "arquivo", ["app.js", "desenho.js", "estilo.css", "vendor/cytoscape.min.js"]
+)
+def test_os_estaticos_sao_servidos_pela_mesma_origem(cliente: Any, arquivo: str) -> None:
+    """Mesma origem é o que dispensa CORS e paga um despertar em vez de dois.
+
+    A biblioteca de desenho entra nisso: vinda de CDN, ela reintroduziria a
+    segunda origem que a decisão evita, e com um modo de falha a mais — a
+    demonstração cairia quando a CDN caísse, por motivo alheio a este projeto.
+    """
+    assert cliente.get(f"/static/{arquivo}").status_code == 200
+
+
+def test_a_biblioteca_vendorizada_confere_com_a_procedencia() -> None:
+    """Dependência sem procedência é dependência que ninguém confere depois.
+
+    A soma está em `docs/dependencias_vendorizadas.md`, e este teste é o que
+    impede a tabela de envelhecer em silêncio quando alguém trocar o arquivo.
+    """
+    soma = hashlib.sha256(VENDORIZADO.read_bytes()).hexdigest()
+    documentado = PROCEDENCIA.read_text(encoding="utf-8")
+
+    assert soma in documentado, (
+        f"o cytoscape.min.js tem soma {soma}, que não está em "
+        "docs/dependencias_vendorizadas.md. Trocar a biblioteca é decisão, e decisão "
+        "atualiza a procedência junto."
+    )
+
+
+def bloco_dos_exemplos() -> str:
+    fonte = APP_JS.read_text(encoding="utf-8")
+    inicio = fonte.index("const EXEMPLOS = [")
+    return fonte[inicio : fonte.index("\n];", inicio)]
+
+
+def test_os_exemplos_guardam_pergunta_e_nunca_resposta() -> None:
+    """Congelar o resultado faria o exemplo testar a si mesmo, e a página
+    continuaria bonita com a API quebrada — a regra vem da curadoria da 6-G."""
+    chaves = set(re.findall(r"^\s{4}(\w+):", bloco_dos_exemplos(), re.MULTILINE))
+
+    assert chaves == {"rotulo", "modo", "de", "para", "profundidade"}, (
+        f"os exemplos guardam {sorted(chaves)}. Só entram pergunta e rótulo: desfecho, "
+        "distância ou qualquer pedaço da resposta faria o exemplo se autoconfirmar."
+    )
+
+
+def test_a_pagina_abre_com_um_exemplo_preenchido() -> None:
+    """Formulário vazio é página morta: o visitante não tem CNPJ na cabeça."""
+    fonte = APP_JS.read_text(encoding="utf-8")
+
+    assert "const EXEMPLO = EXEMPLOS[0];" in fonte
+    assert "21.278.675/0001-77" in bloco_dos_exemplos()
+
+
+def test_os_estados_honestos_tem_botao_proprio() -> None:
+    """A inversão desta demonstração: os estados que não são sucesso **são** o
+    achado, e uma demo que só mostra o caminho encontrado esconde a tese.
+
+    Um visitante que clica nos quatro entende o projeto sem ler o README: a
+    maioria das empresas não tem sócio, a maioria dos pares não se alcança,
+    quando se alcança não são seis graus, e há estrutura que não cabe na tela.
+    """
+    bloco = bloco_dos_exemplos()
+
+    for demonstrado in ("74,8%", "98,41%", "22 saltos", "3.154 vizinhos"):
+        assert demonstrado in bloco, f"falta o exemplo que demonstra {demonstrado}"
+
+
+def test_os_rotulos_dizem_o_que_o_exemplo_demonstra() -> None:
+    """ "Exemplo A" não diz nada e ninguém clica. O rótulo carrega o achado, e de
+    quebra ensina o vocabulário do projeto."""
+    rotulos = re.findall(r'rotulo: "([^"]+)"', bloco_dos_exemplos())
+
+    assert len(rotulos) >= 6
+    assert not any(re.fullmatch(r"Exemplo \w+", rotulo) for rotulo in rotulos)
+    assert all(len(rotulo) > 25 for rotulo in rotulos), "rótulo curto demais para dizer algo"
+
+
+def test_o_enquadramento_fica_junto_dos_exemplos(cliente: Any) -> None:
+    """Combinado desde a curadoria: perto dos exemplos, não em rodapé.
+
+    O visitante generaliza a partir de três casos escolhidos a dedo se ninguém
+    disser, onde ele olha, que os casos não são a mensagem.
+    """
+    pagina = " ".join(cliente.get("/").text.split())
+    exemplos = pagina.index("botoes-de-exemplo")
+    enquadramento = pagina.index("Estes exemplos existem para mostrar")
+    resultado_ = pagina.index('id="resultado"')
+
+    assert exemplos < enquadramento < resultado_, "o enquadramento vem antes da resposta"
+    assert "não para mostrar o que o dado significa" in pagina
+    assert "decisão de modelagem" in pagina, "o critério do grau é julgamento, e é dito"
+
+
+def test_a_pagina_nao_gasta_o_limite_de_consultas(grafo_de_exemplo: Config) -> None:  # noqa: F811
+    """Limitar o HTML faria o limitador barrar quem só abriu o site."""
+    apertado = grafo_de_exemplo.model_copy(update={"limite_por_minuto": 2})
+
+    with TestClient(criar_aplicacao(apertado)) as aberto:
+        codigos = [aberto.get("/").status_code for _ in range(5)]
+        codigos += [aberto.get("/static/estilo.css").status_code for _ in range(5)]
+
+    assert set(codigos) == {200}
+
+
+def test_a_pagina_fica_fora_do_openapi(cliente: Any) -> None:
+    """`/docs` descreve a API. A página não é API."""
+    caminhos = cliente.get("/openapi.json").json()["paths"]
+
+    assert "/" not in caminhos
+    assert "/caminho" in caminhos
+
+
+def test_a_pagina_declara_a_pseudonimizacao(cliente: Any) -> None:
+    """O visitante precisa saber por que uma pessoa aparece como `Sócio 2` — sem
+    isso o rótulo se lê como dado faltando."""
+    texto = " ".join(cliente.get("/").text.split())
+
+    assert "pseudonimizadas" in texto
+    assert "estrutura de rede" in texto, "o enquadramento fica na página, não no README"
+
+
+def test_a_partida_falha_se_a_pagina_nao_veio_no_pacote(
+    grafo_de_exemplo: Config,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aplicação que sobe servindo `404` na raiz é pior que a que não sobe: o
+    defeito só aparece pelo visitante."""
+    from grafo_societario.api import web
+
+    monkeypatch.setattr(web, "PAGINA", PAGINA.with_name("nao-existe.html"))
+
+    with pytest.raises(web.PaginaAusenteError, match="empacotamento"):
+        criar_aplicacao(grafo_de_exemplo)

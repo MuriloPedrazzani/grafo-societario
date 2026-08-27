@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grafo Societário — caminhos entre empresas brasileiras</title>
+<meta name="description" content="Caminhos societários entre empresas brasileiras, a partir dos dados abertos de CNPJ da Receita Federal.">
+<link rel="stylesheet" href="/static/estilo.css">
+</head>
+<body>
+
+<header class="topo">
+  <h1>Grafo Societário</h1>
+  <p class="chamada">
+    Duas empresas brasileiras têm algum vínculo societário? Este serviço responde
+    percorrendo o quadro de sócios da Receita Federal.
+  </p>
+  <p class="faixa" id="faixa" aria-live="polite">carregando os dados no ar…</p>
+</header>
+
+<main>
+  <div class="modos" role="tablist" aria-label="Tipo de consulta">
+    <button type="button" class="modo" id="modo-caminho" role="tab" aria-selected="true">
+      Caminho entre duas
+    </button>
+    <button type="button" class="modo" id="modo-vizinhanca" role="tab" aria-selected="false">
+      Vizinhança de uma
+    </button>
+  </div>
+
+  <form class="consulta" id="consulta" autocomplete="off">
+    <div class="campo">
+      <label for="de" id="rotulo-de">Empresa de origem</label>
+      <input id="de" name="de" inputmode="numeric" spellcheck="false"
+             placeholder="00.000.000/0001-00" aria-describedby="erro-de">
+      <p class="erro-do-campo" id="erro-de" hidden></p>
+    </div>
+
+    <div class="campo" id="bloco-para">
+      <label for="para">Empresa de destino</label>
+      <input id="para" name="para" inputmode="numeric" spellcheck="false"
+             placeholder="00.000.000/0001-00" aria-describedby="erro-para">
+      <p class="erro-do-campo" id="erro-para" hidden></p>
+    </div>
+
+    <div class="campo campo-estreito">
+      <label for="profundidade">Saltos</label>
+      <input id="profundidade" name="profundidade" type="number" min="1" value="10">
+    </div>
+
+    <button type="submit" id="consultar">Consultar</button>
+  </form>
+
+  <section class="exemplos">
+    <h2>Ou veja um exemplo</h2>
+    <div class="botoes-de-exemplo" id="exemplos"></div>
+
+    <div class="enquadramento">
+      <p>
+        <strong>Estes exemplos existem para mostrar que a ferramenta funciona, e não
+        para mostrar o que o dado significa.</strong> O que o dado significa está nos
+        números agregados: <strong>98,41%</strong> dos pares de nós não têm caminho entre
+        si, a distância mediana é de <strong>20 saltos</strong> quando há caminho, e
+        <strong>74,8%</strong> das empresas não têm sócio nenhum registrado. Três
+        caminhos escolhidos a dedo não sustentam conclusão alguma sobre a estrutura
+        societária brasileira.
+      </p>
+      <p>
+        Os exemplos de caminho <strong>excluem trajetos que passam por nó de grau
+        alto</strong>, e isso é uma decisão de modelagem, não uma limpeza: é afirmar que
+        coadministração pelo mesmo contador — alguém que é sócio de mil empresas — não é
+        vínculo societário significativo. A aresta existe e é verdadeira. Achamos que
+        destacá-la convidaria a leitura errada, e dizemos isso para você poder discordar.
+      </p>
+    </div>
+  </section>
+
+  <section id="resultado" class="resultado" aria-live="polite"></section>
+
+  <figure class="desenho" id="desenho" hidden>
+    <div id="tela" class="tela"></div>
+    <figcaption>
+      <p class="detalhe-do-no" id="detalhe-do-no">Clique num nó para ver o nome inteiro.</p>
+      <ul class="legenda">
+        <li><span class="marca marca-pj"></span>empresa</li>
+        <li><span class="marca marca-pf"></span>pessoa física, pseudonimizada</li>
+        <li><span class="marca marca-estrangeiro"></span>sócio estrangeiro</li>
+        <li><span class="marca marca-conector"></span>matriz fora do recorte — <strong>a vizinhança
+          deste nó está incompleta</strong>, só entraram os vínculos com empresas daqui</li>
+      </ul>
+      <ol class="caminho" id="lista"></ol>
+    </figcaption>
+  </figure>
+
+  <details class="cru">
+    <summary>Ver a resposta da API</summary>
+    <p class="nota">
+      A mesma consulta em <code>GET /caminho</code> ou <code>GET /vizinhanca</code>. A
+      documentação interativa está em <a href="/docs">/docs</a>.
+    </p>
+    <pre id="cru"></pre>
+  </details>
+</main>
+
+<footer class="rodape">
+  <p>
+    Dados abertos de CNPJ da Receita Federal. O serviço descreve <strong>estrutura de
+    rede</strong>: não avalia idoneidade, não imputa conduta e não deve embasar decisão
+    sobre pessoas ou empresas.
+  </p>
+  <p>
+    Pessoas físicas aparecem pseudonimizadas por padrão — o nome não entra no artefato
+    publicado, e o rótulo que aparece aqui vale só dentro desta resposta.
+  </p>
+</footer>
+
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/desenho.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -68,6 +68,12 @@ Repository = "https://github.com/MuriloPedrazzani/grafo-societario"
 path = "src/grafo_societario/__init__.py"
 
 [tool.hatch.build.targets.wheel]
+# `web/` mora dentro do pacote de propósito: a API serve a página, e a imagem da
+# Fase 8 precisa dela no wheel sem regra de cópia própria. O hatchling já inclui
+# os não-Python que estão dentro do pacote — conferido com o próprio builder, que
+# lista index.html, app.js e estilo.css. Não há teste disso porque a instalação
+# editável do CI não gera RECORD; o que há é `api/web.py` derivar o caminho do
+# próprio pacote e derrubar a partida se os arquivos não estiverem lá.
 packages = ["src/grafo_societario"]
 
 [tool.pytest.ini_options]
