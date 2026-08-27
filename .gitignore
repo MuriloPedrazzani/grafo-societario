@@ -29,3 +29,7 @@ htmlcov/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Pacotes da Release, montados por scripts/empacotar_artefatos.py. Regeneráveis
+# a partir de data/grafo/, e grandes: 235 MB por competência.
+dist/

@@ -1,0 +1,99 @@
+# Publica os artefatos do grafo, promovendo um rascunho que passou na conferência.
+#
+# ## O pipeline NÃO roda aqui, e isso é afirmação e não limitação
+#
+# Reprocessar exigiria ~35 GB de pico em disco — 6,79 GiB de ZIP, 23,24 GiB de CSV
+# extraído e 4,91 GiB de bronze, todos medidos. O runner padrão garante 14 GB. Não
+# cabe, e a aritmética decide sozinha.
+#
+# Mas a razão de fundo é outra: **o pipeline não roda em CI porque não precisa de
+# CI.** Ele roda em qualquer máquina de 8 GB, que é a afirmação central deste
+# projeto desde a primeira linha do README. Um workflow que reconstruísse tudo
+# provaria menos, não mais — provaria que a construção precisa de infraestrutura.
+#
+# ## O que sobra para o CI é o que só ele faz
+#
+# Conferir, num ambiente que não sabe nada da máquina que construiu, que o pacote
+# publicado é exatamente o que este commit declara publicável. E conferir **antes**
+# de o público ver: o rascunho é o que transforma a soma em condição em vez de
+# relatório. Conferência que só reclama depois é relatório.
+
+name: Publica artefatos
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag do rascunho, no formato artefatos-AAAA-MM"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publicar-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  conferir-e-publicar:
+    name: confere o rascunho e promove
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # Sem `pip install`: o conferidor precisa de `ARTEFATOS_PUBLICAVEIS`, e o
+      # módulo que a declara não importa nada além da biblioteca padrão — é
+      # requisito escrito no próprio módulo, e aqui ele vira economia de um passo.
+      - name: Confere que a lista está ao alcance sem instalar nada
+        run: PYTHONPATH=src python -c "from grafo_societario.graph.artefatos import ARTEFATOS_PUBLICAVEIS as a; print(len(a), 'artefatos declarados')"
+
+      - name: Recusa promover o que já está público
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rascunho=$(gh release view "${{ inputs.tag }}" --json isDraft --jq .isDraft)
+          if [ "$rascunho" != "true" ]; then
+            echo "::error::${{ inputs.tag }} não é rascunho. O portão só serve antes de publicar;"
+            echo "::error::promover o que já está público não confere nada."
+            exit 1
+          fi
+
+      - name: Baixa os ativos do rascunho
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p pacote
+          gh release download "${{ inputs.tag }}" --dir pacote --pattern '*.tar.gz' --pattern '*.tar.gz.sha256'
+          ls -la pacote
+
+      - name: Confere o pacote contra ARTEFATOS_PUBLICAVEIS deste commit
+        run: |
+          set -euo pipefail
+          pacote=$(ls pacote/*.tar.gz)
+          PYTHONPATH=src python scripts/conferir_release.py \
+            --tag "${{ inputs.tag }}" \
+            --pacote "$pacote"
+
+      # Só depois da conferência. Se algum passo acima falhar, o rascunho fica
+      # como está: invisível, e sem ninguém ter baixado artefato errado.
+      - name: Promove o rascunho a publicado
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ inputs.tag }}" --draft=false
+
+      - name: Resumo
+        run: |
+          {
+            echo "### Release \`${{ inputs.tag }}\` publicada"
+            echo
+            echo "Conferido antes de promover: conjunto exato de artefatos, soma de cada um,"
+            echo "soma do pacote e competência da tag batendo com a de dentro."
+          } >> "$GITHUB_STEP_SUMMARY"

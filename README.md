@@ -302,6 +302,25 @@ grafo-societario ingest --ultima                # usa a competência mais recent
 grafo-societario ingest --verificar-integridade # confere o SHA-256 do que está em disco
 ```
 
+### O pipeline não roda em CI porque não precisa de CI
+
+Reconstruir os artefatos exige **~35 GB de pico em disco**: 6,79 GiB de ZIP em cache, 23,24 GiB de CSV extraído e 4,91 GiB de Parquet bronze. Um runner padrão do GitHub Actions garante 14 GB. Não cabe.
+
+Mas a aritmética é o argumento menor. O maior é que a construção **roda em qualquer máquina de 8 GB**, que é a afirmação central deste projeto — e um workflow que reconstruísse tudo provaria menos, não mais: provaria que a construção precisa de infraestrutura.
+
+O que o CI faz é o que só ele pode fazer. Você constrói na sua máquina, empacota e publica um **rascunho**; o workflow confere num ambiente que não sabe nada do seu computador e só então torna a Release pública:
+
+```bash
+python scripts/empacotar_artefatos.py --competencia 2026-06
+gh release create artefatos-2026-06 --draft --title "Artefatos 2026-06" \
+    dist/artefatos-2026-06.tar.gz dist/artefatos-2026-06.tar.gz.sha256
+# aba Actions → "Publica artefatos" → tag artefatos-2026-06
+```
+
+A conferência recusa a Release se o pacote não contiver **exatamente** os artefatos que aquele commit declara publicáveis, se qualquer soma divergir, ou se a competência da tag não bater com a de dentro do pacote. Esta última é a que mais importa: uma Release rotulada com o mês errado produz uma imagem que sobe normalmente servindo o mês errado, sem nada indicar que está errada.
+
+O rascunho é o que transforma a conferência em portão. Conferência que só reclama depois de publicar é relatório.
+
 Uma competência ocupa **6,79 GiB comprimidos** e **23,24 GiB** depois de extraída;
 o espaço é conferido antes de a extração começar. Rodar de novo não rebaixa nada:
 o manifesto registra tamanho, SHA-256, ETag e origem de cada arquivo.

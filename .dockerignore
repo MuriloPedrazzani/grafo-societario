@@ -3,6 +3,7 @@
 # artefatos vêm da Release, não do disco de quem constrói. Sem esta exclusão o
 # build fica lento e, pior, passa a depender do que existe na máquina local.
 data/
+dist/
 .venv/
 .git/
 .github/
