@@ -177,6 +177,38 @@ def test_a_altura_da_tela_sai_do_conteudo() -> None:
     )
 
 
+def test_o_vendorizado_nao_sofre_conversao_de_fim_de_linha() -> None:
+    """A procedência registra o SHA-256 do arquivo **como foi baixado**, e o
+    teste acima confere esse número contra os bytes em disco.
+
+    Com `core.autocrlf=true` — o padrão em instalações Windows — o checkout troca
+    31 LF por CRLF, o arquivo cresce 31 bytes e a soma deixa de bater. Isso
+    aconteceu de verdade: o teste da procedência reprovou num checkout após
+    merge, e passou a sessão inteira antes disso só porque o arquivo não tinha
+    sido rematerializado.
+
+    O teste da soma sozinho não é guarda suficiente: ele reprova em toda máquina
+    Windows e em nenhuma da CI, que roda em Linux. **Uma soma de verificação que
+    só vale no sistema operacional do servidor não verifica nada.** O que vale em
+    toda máquina é o `-text` no `.gitattributes`, e é ele que esta guarda exige.
+    """
+    atributos = (Path(__file__).resolve().parents[1] / ".gitattributes").read_text(encoding="utf-8")
+
+    linha = next(
+        (
+            texto
+            for texto in atributos.splitlines()
+            if "vendor/" in texto and not texto.startswith("#")
+        ),
+        None,
+    )
+    assert linha is not None, "o vendorizado saiu do .gitattributes"
+    assert "-text" in linha, (
+        f"o vendorizado precisa de `-text`, senão o checkout no Windows converte "
+        f"o fim de linha e a soma da procedência deixa de bater. Linha atual: {linha!r}"
+    )
+
+
 def test_a_guarda_de_fronteira_sabe_reprovar() -> None:
     """Controle positivo: uma guarda que só compara strings passa fácil demais.
 

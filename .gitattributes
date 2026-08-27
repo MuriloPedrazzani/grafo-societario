@@ -14,4 +14,12 @@ tests/fixtures/*.csv -text
 # O caminho é o completo de propósito: padrão de `.gitattributes` que contém
 # barra é ancorado no diretório do arquivo, então `web/static/vendor/*.js` não
 # alcançaria `src/grafo_societario/web/...`.
-src/grafo_societario/web/static/vendor/*.js linguist-vendored
+#
+# O `-text` é pela mesma razão das fixtures acima, e não é cosmético: a
+# procedência registra o SHA-256 do arquivo **como foi baixado**, e há teste
+# conferindo esse número contra os bytes em disco. Com `core.autocrlf=true` o
+# checkout troca 31 LF por CRLF, o arquivo cresce 31 bytes e a soma deixa de
+# bater — em toda máquina Windows, e em nenhuma da CI, que roda em Linux.
+# Soma de verificação que só vale no sistema operacional do servidor não
+# verifica nada.
+src/grafo_societario/web/static/vendor/*.js linguist-vendored -text
