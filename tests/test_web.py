@@ -177,6 +177,62 @@ def test_a_altura_da_tela_sai_do_conteudo() -> None:
     )
 
 
+def test_o_vendorizado_nao_sofre_conversao_de_fim_de_linha() -> None:
+    """A procedência registra o SHA-256 do arquivo **como foi baixado**, e o
+    teste acima confere esse número contra os bytes em disco.
+
+    Com `core.autocrlf=true` — o padrão em instalações Windows — o checkout troca
+    31 LF por CRLF, o arquivo cresce 31 bytes e a soma deixa de bater. Isso
+    aconteceu de verdade: o teste da procedência reprovou num checkout após
+    merge, e passou a sessão inteira antes disso só porque o arquivo não tinha
+    sido rematerializado.
+
+    O teste da soma sozinho não é guarda suficiente: ele reprova em toda máquina
+    Windows e em nenhuma da CI, que roda em Linux. **Uma soma de verificação que
+    só vale no sistema operacional do servidor não verifica nada.** O que vale em
+    toda máquina é o `-text` no `.gitattributes`, e é ele que esta guarda exige.
+    """
+    atributos = (Path(__file__).resolve().parents[1] / ".gitattributes").read_text(encoding="utf-8")
+
+    linha = next(
+        (
+            texto
+            for texto in atributos.splitlines()
+            if "vendor/" in texto and not texto.startswith("#")
+        ),
+        None,
+    )
+    assert linha is not None, "o vendorizado saiu do .gitattributes"
+    assert "-text" in linha, (
+        f"o vendorizado precisa de `-text`, senão o checkout no Windows converte "
+        f"o fim de linha e a soma da procedência deixa de bater. Linha atual: {linha!r}"
+    )
+
+
+def test_falha_de_rede_e_falha_de_desenho_sao_estados_distintos() -> None:
+    """Um `TypeError` de renderização chegava ao visitante como "a conexão
+    falhou — a instância hiberna": ele espera, recarrega, espera de novo, e o
+    defeito nunca é reportado porque parece infraestrutura.
+
+    É a mesma família do `alem_do_limite` virando "não existe" — resposta
+    plausível que afirma a coisa errada —, e numa demonstração pública é pior,
+    porque quem vê não tem como diagnosticar.
+
+    Separar por tipo de exceção não serviria: `fetch` rejeitado lança
+    `TypeError`, e defeito de renderização também. O que separa é **onde** ela
+    acontece, e é por isso que a guarda exige os dois textos e o `console.error`.
+    """
+    fonte = APP_JS.read_text(encoding="utf-8")
+
+    assert "Não consegui falar com o serviço" in fonte, "o estado de falha de rede sumiu"
+    assert "A página falhou ao desenhar" in fonte, (
+        "defeito de renderização voltou a se disfarçar de problema de conexão"
+    )
+    assert "console.error" in fonte, (
+        "sem a pilha no console, quem for reportar o defeito não tem o que reportar"
+    )
+
+
 def test_a_guarda_de_fronteira_sabe_reprovar() -> None:
     """Controle positivo: uma guarda que só compara strings passa fácil demais.
 

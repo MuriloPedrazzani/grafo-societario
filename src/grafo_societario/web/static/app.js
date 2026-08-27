@@ -404,34 +404,65 @@ async function consultar() {
   const relogio = carregando();
   alvo("consultar").disabled = true;
   try {
-    const resposta = await fetch(enderecoDaConsulta());
-    const corpo = await resposta.json();
+    // Duas falhas diferentes, e o `try` é estreito de propósito.
+    //
+    // Só o que está aqui dentro pode falhar por rede. Tudo o que vem depois é
+    // esta página desenhando, e um defeito ali **não** é problema de conexão.
+    //
+    // Separar por tipo de exceção não funcionaria: `fetch` rejeitado lança
+    // `TypeError`, e `TypeError` é também o que um defeito de renderização
+    // lança. O que separa as duas é **onde** a exceção acontece, não o que ela é.
+    let resposta;
+    let corpo;
+    try {
+      resposta = await fetch(enderecoDaConsulta());
+      corpo = await resposta.json();
+    } catch (erro) {
+      limpar();
+      esconderDesenho();
+      resultado.appendChild(
+        faixaDeProblema(
+          "Não consegui falar com o serviço",
+          "A conexão falhou. Num plano gratuito a instância hiberna, então tentar de " +
+            "novo em alguns segundos costuma resolver.",
+          String(erro)
+        )
+      );
+      return;
+    }
+
     alvo("cru").textContent = JSON.stringify(corpo, null, 2);
     limpar();
 
-    if (!resposta.ok) {
-      resultado.appendChild(faixaDoStatus(resposta, corpo));
+    try {
+      if (!resposta.ok) {
+        resultado.appendChild(faixaDoStatus(resposta, corpo));
+        esconderDesenho();
+        return;
+      }
+      if (modo === "vizinhanca") {
+        resultado.appendChild(cartaoDaVizinhanca(corpo));
+        mostrarDesenho(corpo.tem_vinculo ? window.Desenho.elementosDaVizinhanca(corpo) : [], corpo.nos);
+      } else {
+        resultado.appendChild(cartaoDoCaminho(corpo));
+        mostrarDesenho(window.Desenho.elementosDoCaminho(corpo.caminho || []), corpo.caminho || []);
+      }
+    } catch (erro) {
+      // O console é o único lugar onde a pilha sobrevive, e sem ela quem for
+      // reportar não tem o que reportar.
+      console.error("a página falhou ao desenhar a resposta do serviço", erro);
+      limpar();
       esconderDesenho();
-      return;
+      resultado.appendChild(
+        faixaDeProblema(
+          "A página falhou ao desenhar esta resposta",
+          "O serviço respondeu; quem quebrou foi esta página. Esperar não resolve, e " +
+            "recarregar provavelmente também não. O erro está no console do navegador — " +
+            "reportá-lo é o que permite corrigir.",
+          String(erro)
+        )
+      );
     }
-    if (modo === "vizinhanca") {
-      resultado.appendChild(cartaoDaVizinhanca(corpo));
-      mostrarDesenho(corpo.tem_vinculo ? window.Desenho.elementosDaVizinhanca(corpo) : [], corpo.nos);
-    } else {
-      resultado.appendChild(cartaoDoCaminho(corpo));
-      mostrarDesenho(window.Desenho.elementosDoCaminho(corpo.caminho || []), corpo.caminho || []);
-    }
-  } catch (erro) {
-    limpar();
-    esconderDesenho();
-    resultado.appendChild(
-      faixaDeProblema(
-        "Não consegui falar com o serviço",
-        "A conexão falhou. Num plano gratuito a instância hiberna, então tentar de " +
-          "novo em alguns segundos costuma resolver.",
-        String(erro)
-      )
-    );
   } finally {
     clearTimeout(relogio);
     alvo("consultar").disabled = false;
