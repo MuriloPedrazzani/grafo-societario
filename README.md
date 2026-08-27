@@ -4,7 +4,11 @@
 
 Caminhos societários entre empresas brasileiras a partir dos dados abertos de CNPJ da Receita Federal.
 
-> **Status:** em desenvolvimento — Fase 6 de 9. Este README é atualizado a cada fase concluída.
+![Vizinhança de uma empresa a dois saltos: dez nós e doze vínculos, dispostos em anéis concêntricos por distância, com três arestas fechando ciclo dentro do mesmo anel](docs/imagens/vizinhanca-com-ciclo.png)
+
+*Vizinhança de dois saltos, desenhada pela própria API. Os anéis são a distância — primeiro salto, segundo salto — e as três arestas que cruzam **dentro** do mesmo anel são o que uma árvore de busca esconderia: é por isso que a resposta é o subgrafo induzido, e não a árvore.*
+
+> **Status:** em desenvolvimento — Fase 7 de 9. Este README é atualizado a cada fase concluída.
 
 ---
 
@@ -222,6 +226,30 @@ O limite governa **até onde o caminho é mostrado**, e não até onde a busca v
 
 Quem quer o recorte inteiro não deveria varrer: o artefato é publicado em Release e traz mais do que a rota devolve. O `429` diz isso, com `Retry-After` junto.
 
+## A demonstração
+
+A página é servida pela **própria API**, na mesma origem — não há GitHub Pages, não há CORS, e a consequência fica dita: se a API cair, a demonstração cai junto. Ela desenha o que a API responde, sem regra de negócio própria.
+
+### Um caminho é uma sequência, e é desenhado como tal
+
+![Caminho societário de quatro saltos entre duas empresas: cinco nós numa linha horizontal, retângulos de empresa alternando com círculos de pessoa física pseudonimizada](docs/imagens/caminho-societario.png)
+
+As posições são calculadas a partir do dado, nunca sorteadas: a mesma consulta desenha igual a cada carregamento. Caminho vira **linha**, na ordem dos saltos; vizinhança vira **anéis** por distância. Os saltos ímpares aqui são pessoas físicas, e aparecem como `Sócio 2` e `Sócio 4` — a pseudonimização da Fase 6 funcionando à vista, sem precisar ser explicada.
+
+### O que não cabe numa tela é dito, não desenhado pela metade
+
+![Cartão informando que a empresa tem 3.154 vizinhos no primeiro salto, com um único nó desenhado abaixo](docs/imagens/hub-grande-demais.png)
+
+A página desenha no máximo 150 nós, e a API devolveria mil. Quando o nível seguinte não cabe, ele é **recusado inteiro** — meio nível entregaria um subgrafo que parece completo sem ser. O limite de um desenho não é o de uma resposta, e a tela diz qual dos dois está falando.
+
+### Estes exemplos mostram que a ferramenta funciona, não o que o dado significa
+
+Os três casos acima foram escolhidos a dedo, e três caminhos curtos escolhidos a dedo não sustentam conclusão nenhuma sobre a estrutura societária brasileira. O que o dado significa está nos números agregados desta página: a maior parte do recorte é uma empresa isolada, a distância mediana é de 20 saltos quando há caminho, e 74,8% das empresas não têm sócio nenhum registrado.
+
+Os exemplos de caminho também **excluem trajetos que passam por nó de grau alto**, e isso é decisão de modelagem, não limpeza: é afirmar que coadministração pelo mesmo contador — alguém que é sócio de mil empresas — não é vínculo societário significativo. A aresta existe e é verdadeira. Está dito aqui para você poder discordar.
+
+---
+
 ## Arquitetura
 
 ```
@@ -246,15 +274,15 @@ Receita Federal (ZIP/CSV)
    [ API ]       FastAPI sobre artefatos imutáveis, lidos com mmap        ✔ pronto
         │
         ▼
-   [ web ]       página de consulta e desenho do subgrafo                 Fase 7
+   [ web ]       página de consulta e desenho do subgrafo                 ✔ pronto
 ```
 
 As decisões estão registradas hoje nos módulos que as implementam e nas mensagens de commit, que explicam o porquê de cada uma. Os ADRs formais, em `docs/adr/`, são escritos na Fase 8 — inclusive o da recusa de usar o CPF sem máscara, com o custo medido.
 
 ## Stack
 
-Em uso: `Python` · `DuckDB` · `Parquet` · `NumPy/SciPy` · `FastAPI` · `GitHub Actions`
-Previsto: `Cytoscape.js` (Fase 7) · `Docker` (Fase 8)
+Em uso: `Python` · `DuckDB` · `Parquet` · `NumPy/SciPy` · `FastAPI` · `Cytoscape.js` · `GitHub Actions`
+Previsto: `Docker` (Fase 8)
 
 ---
 
@@ -335,6 +363,18 @@ Isso decide o desenho da busca. Para um par tirado ao acaso, a resposta "não h�
 caminho" sai de comparar dois inteiros, sem percorrer nada — 87% dos nós estão
 fora do gigante. E quando os dois estão dentro dele, o espaço a percorrer é 1,34
 milhão de nós com **grau médio 2,79**, não 10,6 milhões.
+
+Para um par tirado ao acaso do grafo inteiro, a chance de haver caminho é
+**1,59%** — ou seja, **98,41% dos pares não têm caminho nenhum**. O número sai da
+distribuição de componentes, `Σcᵢ²/n²`, não de amostragem.
+
+Ele **não contradiz** os 0,55% da seção sobre seis graus. Aquele é medido *dentro
+do maior componente*, entre pares que já se conectam, e responde "quão longe?".
+Este é medido sobre *o grafo inteiro* e responde "conectam-se?". Denominadores
+diferentes, perguntas diferentes. Confundir os dois é fácil, e nós confundimos:
+uma versão anterior deste README dizia "87% dos pares", que na verdade é a
+proporção de **nós** fora do maior componente. São grandezas diferentes e as duas
+estão certas — o que estava errado era o substantivo.
 
 O nó de maior grau do recorte — 3.728 vizinhos — **não está no gigante**: ele é o
 centro de uma estrela quase pura que forma sozinha o segundo componente. Dentro do
