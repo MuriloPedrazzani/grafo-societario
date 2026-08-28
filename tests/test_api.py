@@ -473,9 +473,15 @@ def test_nenhum_array_do_acervo_e_gravavel(pronto: Config) -> None:
 def test_a_aplicacao_nao_carrega_motor_nem_leitor_de_parquet() -> None:
     """A regra que atravessa a fase inteira, afirmada no módulo que responde.
 
-    A imagem da Fase 8 tem teto de 300 MB. Se a aplicação arrastasse DuckDB,
-    SciPy ou pyarrow, o catálogo do commit anterior não teria razão de existir —
-    o Parquet já estava lá.
+    Se a aplicação arrastasse DuckDB, SciPy ou pyarrow, o catálogo do commit
+    anterior não teria razão de existir — o Parquet já estava lá.
+
+    **Esta guarda sozinha não bastava.** Ela olha `sys.modules`, ou seja, o nível
+    de *import*, e por muito tempo conviveu com `duckdb` declarado em
+    `dependencies`: a imagem de deploy embarcava 58 MB de um motor que o serving
+    nunca carrega, e este teste passava verde o tempo todo porque a pergunta dele
+    é outra. O par que fecha a fronteira está em `test_empacotamento.py`, que
+    pergunta o que o **empacotamento** entrega.
     """
     codigo = (
         "import sys; import grafo_societario.api.main; "

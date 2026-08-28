@@ -17,15 +17,23 @@ classifiers = [
     "Private :: Do Not Upload",
 ]
 dynamic = ["version"]
+# O conjunto base é **só o que responde consulta**. O caminho de resposta lê
+# arrays com NumPy e a biblioteca padrão; nem FastAPI nem uvicorn chegam perto do
+# motor de ETL.
+#
+# A fronteira entre serving e construção já era afirmada por teste — um
+# subprocesso importa a aplicação e exige que `duckdb`, `scipy` e `pyarrow` não
+# apareçam em `sys.modules`. Mas ela estava imposta só no nível de **import**, e
+# a dependência continuava declarada aqui: a imagem de deploy embarcava 58 MB de
+# DuckDB que o serving nunca carrega, contradizendo o que o teste afirmava.
+#
+# É a mesma forma da vistoria de dado pessoal que não abria `.js`: a regra
+# existia, a imposição tinha um buraco, e nada acusava. Os megabytes são
+# consequência; o achado é a distância entre o que o teste garante e o que o
+# empacotamento entrega.
 dependencies = [
     "pydantic-settings>=2.7",
-    "httpx>=0.28",
-    "tenacity>=9.0",
-    "typer>=0.15",
-    "duckdb>=1.1",
     "numpy>=2.0",
-    # O serving. Nem FastAPI nem uvicorn chegam perto do motor de ETL: o
-    # caminho de resposta lê arrays com NumPy e a biblioteca padrão.
     "fastapi>=0.115",
     "uvicorn>=0.34",
 ]
@@ -34,15 +42,24 @@ dependencies = [
 grafo-societario = "grafo_societario.cli:main"
 
 [project.optional-dependencies]
-# Só o que a construção dos artefatos precisa, e que o serving não carrega.
+# A porta de entrada do pipeline: `typer` para a interface, `httpx` e `tenacity`
+# para falar com a Receita. Nada disto responde consulta, e por isso nada disto
+# entra na imagem de deploy — que sobe `uvicorn` direto, sem passar pela CLI.
+cli = ["typer>=0.15", "httpx>=0.28", "tenacity>=9.0"]
+
+# O que a **construção** dos artefatos precisa, e que o serving não carrega.
 # `components.py` usa `scipy.sparse.csgraph` para rotular os componentes; a API
-# lê `componentes.npy` com NumPy e nunca chama o scipy. Manter os dois grupos
-# separados é o que permite a imagem da Fase 8 não embarcar uma biblioteca
-# científica para responder consulta sobre array pré-computado — mesmo motivo
-# pelo qual `graph/csr.py` não importa DuckDB.
-build = ["scipy>=1.14"]
+# lê `componentes.npy` com NumPy e nunca chama o scipy. `duckdb` é o motor de
+# ETL do bronze e do silver, e o caminho de resposta nunca o importa — há teste
+# em subprocesso exigindo isso.
+#
+# Manter os grupos separados é o que faz a imagem de deploy **não** embarcar
+# biblioteca científica nem motor de banco para responder consulta sobre array
+# pré-computado — mesmo motivo pelo qual `graph/csr.py` não importa DuckDB.
+build = ["duckdb>=1.1", "scipy>=1.14"]
+
 dev = [
-    "grafo-societario[build]",
+    "grafo-societario[build,cli]",
     "pytest>=8.0",
     "ruff>=0.9",
     "mypy>=1.14",
@@ -79,11 +96,16 @@ packages = ["src/grafo_societario"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+    # Roda por padrão, inclusive no CI. O marcador existe para dar `-m "not lento"`
+    # a quem estiver iterando localmente — não para o teste ser pulado onde importa.
+    "lento: cria ambiente virtual e instala o pacote do zero; ~90 s",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "tests"]
+src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = [
@@ -104,7 +126,7 @@ select = [
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 strict = true
 warn_unreachable = true
 show_error_codes = true

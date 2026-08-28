@@ -1,0 +1,25 @@
+# O contexto de build sobe inteiro para o daemon antes de qualquer instrução
+# rodar. `data/` tem 662 MB nesta máquina e nada dele entra na imagem — os
+# artefatos vêm da Release, não do disco de quem constrói. Sem esta exclusão o
+# build fica lento e, pior, passa a depender do que existe na máquina local.
+data/
+dist/
+.venv/
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.pyc
+
+# Nada disto responde consulta. Ficam de fora para a imagem não carregar
+# suíte de teste, documentação nem fixture — `tests/fixtures` sozinho traz
+# CSV que descreve o formato da Receita e não serve ao serving.
+tests/
+docs/
+*.md
+!README.md
+
+# `README.md` é exceção porque o `pyproject.toml` o declara em `readme`, e o
+# hatchling recusa construir o wheel sem ele.
