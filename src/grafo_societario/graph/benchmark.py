@@ -75,9 +75,21 @@ class Etapa:
 
     @property
     def acrescimo(self) -> int:
-        """O que a etapa somou à residente. Pode ser zero se ela coube no que
-        as anteriores já tinham reservado."""
-        return max(0, self.pico - self.residente_inicial)
+        """O que a etapa somou à residente. Zero se ela coube no que as
+        anteriores já tinham reservado.
+
+        Sem trava. Havia `max(0, …)` aqui, e ela existia porque o pico saía
+        abaixo da residente inicial — o que é impossível pela definição de pico,
+        e acontecia porque as duas grandezas vinham de leituras em instantes
+        diferentes.
+
+        A trava não sai porque a causa foi corrigida; sai porque **outra coisa
+        passou a segurar a invariante**. Duas, na verdade: o amostrador inicializa
+        o pico com a mesma leitura que vira `residente_inicial`, e o teste afirma
+        `pico >= residente_inicial`. Com as duas no lugar, uma violação futura
+        vira suíte vermelha em vez de zero disfarçado de medição.
+        """
+        return self.pico - self.residente_inicial
 
 
 @dataclass(frozen=True)
