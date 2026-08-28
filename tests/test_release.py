@@ -324,6 +324,29 @@ def test_artefatos_nao_importa_nada_fora_da_biblioteca_padrao() -> None:
     )
 
 
+def test_os_dois_TIPOS_do_projeto_nao_se_substituem_em_silencio() -> None:
+    """Há dois `TIPOS` no projeto, com o mesmo nome e formas diferentes.
+
+    `artefatos.TIPOS` é a tupla da ordem em que `atributos.npy` codifica o tipo.
+    `transform.identity.TIPOS` é o mapa do código da Receita (`"1"` para pessoa
+    jurídica). Um import trocado é plausível — o nome é idêntico.
+
+    Isto estava registrado como "falharia alto", que era **previsão**. Aqui vira
+    medição: a substituição levanta `AttributeError` no uso real, que é
+    `TIPOS.index(...)`. Se algum dia as duas formas convergirem, a troca passa a
+    ser silenciosa e este teste é que avisa.
+    """
+    from grafo_societario.graph.artefatos import TIPOS as TIPOS_DO_ARTEFATO
+    from grafo_societario.transform.identity import TIPOS as TIPOS_DA_RECEITA
+
+    assert isinstance(TIPOS_DO_ARTEFATO, tuple)
+    assert isinstance(TIPOS_DA_RECEITA, dict)
+    assert TIPOS_DO_ARTEFATO.index("pessoa_fisica") == 1
+
+    with pytest.raises(AttributeError):
+        TIPOS_DA_RECEITA.index("pessoa_fisica")  # type: ignore[attr-defined]
+
+
 def test_o_workflow_recusa_tag_com_mais_de_uma_release() -> None:
     """Aconteceu na primeira publicação real: três rascunhos com a mesma tag.
 
