@@ -20,6 +20,7 @@ import io
 import json
 import sys
 import tarfile
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -322,6 +323,46 @@ def test_artefatos_nao_importa_nada_fora_da_biblioteca_padrao() -> None:
         f"publicação instala só NumPy e importa este módulo — cada dependência "
         f"nova aqui é uma que o CI passa a ter de instalar, ou quebra."
     )
+
+
+def test_a_soneira_recusa_cronometrar_resposta_inesperada() -> None:
+    """O controle positivo é o defeito de hoje, virado caso de teste.
+
+    A vizinhança foi cronometrada com `de` e `profundidade` — os nomes errados. O
+    servidor respondeu `422`, ninguém olhou o status, e o tempo entrou no ESTADO
+    como se fosse uma travessia medida. O número era plausível, e número plausível
+    é o que menos se confere.
+
+    Se `pedir` não levantar aqui, ela é mais uma guarda que nunca recusou.
+    """
+    soneira = _carregar("soneira")
+    servidor = _servidor_que_responde_422()
+    try:
+        with pytest.raises(soneira.RespostaInesperadaError, match="422"):
+            soneira.pedir(
+                f"http://127.0.0.1:{servidor.server_address[1]}/vizinhanca?de=x&profundidade=2"
+            )
+    finally:
+        servidor.shutdown()
+
+
+def _servidor_que_responde_422() -> HTTPServer:
+    """Um servidor mínimo que recusa como o real recusaria parâmetro errado."""
+    import threading
+
+    class Recusa(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(422)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"detail":"parametro desconhecido"}')
+
+        def log_message(self, *_: object) -> None:
+            pass
+
+    servidor = HTTPServer(("127.0.0.1", 0), Recusa)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    return servidor
 
 
 def test_os_dois_TIPOS_do_projeto_nao_se_substituem_em_silencio() -> None:

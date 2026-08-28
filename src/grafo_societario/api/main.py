@@ -38,6 +38,7 @@ from grafo_societario.api import caminho, empresa, vizinhanca, web
 from grafo_societario.api.deps import AcervoDep, ciclo
 from grafo_societario.api.erros import registrar_tratadores
 from grafo_societario.api.limite import limitar
+from grafo_societario.api.memoria import residente_em_bytes
 from grafo_societario.config import Config
 
 
@@ -89,6 +90,11 @@ def criar_aplicacao(config: Config | None = None) -> FastAPI:
                 "proxies_confiaveis": acervo.config.proxies_confiaveis,
             },
             "segundos_de_partida": round(acervo.segundos_de_partida, 3),
+            # Relatório, nunca portão: `null` onde não há `/proc` e o `status`
+            # continua `ok`. O que ele mede é uso, não falha — e é o instrumento
+            # da soneira que responde se a residente estabiliza sob cobertura
+            # crescente do grafo, ou sobe até o teto de 512 MB do free tier.
+            "residente_bytes": residente_em_bytes(),
         }
 
     return app
