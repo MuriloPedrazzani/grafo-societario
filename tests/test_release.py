@@ -23,6 +23,7 @@ import tarfile
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -57,7 +58,21 @@ def artefatos_falsos(tmp_path: Path) -> Path:
     origem.mkdir(parents=True)
     for indice, nome in enumerate(ARTEFATOS_PUBLICAVEIS):
         (origem / nome).write_bytes(f"conteudo de {nome} #{indice}".encode())
+    _gravar_tipos_e_nomes(origem, tipos=[0, 1, 0, 1, 2], com_nome=[True, False, True, False, True])
     return origem
+
+
+def _gravar_tipos_e_nomes(origem: Path, tipos: list[int], com_nome: list[bool]) -> None:
+    """`atributos.npy` e `nome_offsets.npy` de verdade, que o conferidor carrega.
+
+    Os outros doze podem ser bytes quaisquer: o conferidor só soma. Estes dois ele
+    interpreta, porque é deles que sai a resposta sobre pessoa física com nome.
+    """
+    np.save(origem / "atributos.npy", np.array(tipos, dtype=np.int8))
+    offsets = [0]
+    for tem in com_nome:
+        offsets.append(offsets[-1] + (10 if tem else 0))
+    np.save(origem / "nome_offsets.npy", np.array(offsets, dtype=np.int32))
 
 
 @pytest.fixture
@@ -192,6 +207,56 @@ def test_recusa_tag_fora_do_formato(pacote_valido: tuple[Path, str], tag: str) -
         conferidor.conferir(pacote, tag, soma)
 
 
+def test_recusa_pacote_com_pessoa_fisica_nomeada(artefatos_falsos: Path, tmp_path: Path) -> None:
+    """O único erro desta suíte que não tem volta.
+
+    Ativo de Release se apaga; não se desbaixa. Por isso a conferência recalcula
+    do próprio tar em vez de acreditar no que o manifesto declara — quem empacotou
+    pode ter empacotado com `EXPOR_PF` ligada e anotado zero assim mesmo.
+    """
+    _gravar_tipos_e_nomes(
+        artefatos_falsos, tipos=[0, 1, 0, 1, 2], com_nome=[True, True, True, False, True]
+    )
+    pacote = empacotador.montar(artefatos_falsos, "2026-06", "SP", tmp_path / "pf")
+
+    with pytest.raises(conferidor.ReleaseInvalidaError, match="pessoas físicas têm nome"):
+        conferidor.conferir(pacote, "artefatos-2026-06", _soma(pacote))
+
+
+def test_recusa_manifesto_sem_o_campo_de_pessoa_fisica(pacote_valido: tuple[Path, str]) -> None:
+    """Campo ausente reprova junto com campo diferente de zero.
+
+    Pacote montado por versão anterior do empacotador não declara o número, e
+    aceitar a ausência seria tratar "não sei" como "está tudo bem".
+    """
+    pacote, _ = pacote_valido
+
+    def apagar_campo(membros):  # type: ignore[no-untyped-def]
+        saida = []
+        for info, corpo in membros:
+            if info.name == "manifesto.json":
+                dados = json.loads(corpo.decode("utf-8"))
+                dados.pop("pessoas_fisicas_com_nome", None)
+                corpo = json.dumps(dados).encode("utf-8")
+            saida.append((info, corpo))
+        return saida
+
+    remontado = _remontar(pacote, apagar_campo)
+
+    with pytest.raises(conferidor.ReleaseInvalidaError, match="manifesto declara"):
+        conferidor.conferir(remontado, "artefatos-2026-06", _soma(remontado))
+
+
+def test_o_montador_conta_pessoa_fisica_com_nome(artefatos_falsos: Path) -> None:
+    """Controle positivo do contador: ele sabe devolver diferente de zero."""
+    assert empacotador.pessoas_fisicas_com_nome(artefatos_falsos) == 0
+
+    _gravar_tipos_e_nomes(
+        artefatos_falsos, tipos=[0, 1, 1, 1, 2], com_nome=[True, True, True, False, True]
+    )
+    assert empacotador.pessoas_fisicas_com_nome(artefatos_falsos) == 2
+
+
 # ------------------------------------------------- propriedades do empacotador
 
 
@@ -241,25 +306,31 @@ def test_montador_e_conferidor_nao_compartilham_logica() -> None:
     é a própria AST, e perguntar a ela é mais barato e mais exato que inventar um
     detector — corolário da regra 14 do ESTADO.
     """
-    importados = {}
-    for nome in ("conferir_release", "empacotar_artefatos"):
-        arvore = ast.parse((RAIZ / "scripts" / f"{nome}.py").read_text(encoding="utf-8"))
-        modulos: set[str] = set()
+    modulos: dict[str, set[str]] = {}
+    nomes_do_projeto: dict[str, set[str]] = {}
+    for arquivo in ("conferir_release", "empacotar_artefatos"):
+        arvore = ast.parse((RAIZ / "scripts" / f"{arquivo}.py").read_text(encoding="utf-8"))
+        modulos[arquivo] = set()
+        nomes_do_projeto[arquivo] = set()
         for no in ast.walk(arvore):
             if isinstance(no, ast.Import):
-                modulos.update(alias.name for alias in no.names)
+                modulos[arquivo].update(alias.name for alias in no.names)
             elif isinstance(no, ast.ImportFrom) and no.module:
-                modulos.add(no.module)
-        importados[nome] = modulos
+                modulos[arquivo].add(no.module)
+                if no.module.startswith("grafo_societario"):
+                    nomes_do_projeto[arquivo].update(alias.name for alias in no.names)
 
-    assert "empacotar_artefatos" not in importados["conferir_release"], (
+    assert "empacotar_artefatos" not in modulos["conferir_release"], (
         "o conferidor importou o montador; a conferência deixou de ser independente"
     )
-    assert "conferir_release" not in importados["empacotar_artefatos"]
+    assert "conferir_release" not in modulos["empacotar_artefatos"]
 
-    comum = importados["conferir_release"] & importados["empacotar_artefatos"]
-    do_projeto = {modulo for modulo in comum if modulo.startswith("grafo_societario")}
-    assert do_projeto == {"grafo_societario.graph.artefatos"}, (
-        f"as duas metades só podem se encontrar em ARTEFATOS_PUBLICAVEIS; "
-        f"compartilham também {do_projeto - {'grafo_societario.graph.artefatos'}}"
+    # A pergunta precisa não é "quais módulos", é "quais NOMES" — e se algum
+    # deles é função. Duas constantes em comum é acordo; uma função em comum é
+    # lógica compartilhada, que é o que anula a independência.
+    comum = nomes_do_projeto["conferir_release"] & nomes_do_projeto["empacotar_artefatos"]
+    assert comum == {"ARTEFATOS_PUBLICAVEIS", "TIPOS"}, (
+        f"as duas metades só podem compartilhar constantes; em comum: {sorted(comum)}"
     )
+    for nome in comum:
+        assert nome.isupper(), f"{nome} não é constante — lógica compartilhada anula a conferência"

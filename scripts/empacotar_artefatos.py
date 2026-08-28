@@ -5,8 +5,8 @@ separada de propósito: se o mesmo código montasse e conferisse, a conferência
 pegaria defeito do montador — ela confirmaria apenas que ele foi consistente
 consigo mesmo.
 
-As duas se encontram em **`ARTEFATOS_PUBLICAVEIS`, e só nisso**. Nenhuma importa
-nada da outra.
+As duas se encontram em **duas constantes** — `ARTEFATOS_PUBLICAVEIS` e `TIPOS` —
+e em nenhuma função. Nenhuma importa nada da outra.
 
 ## O tar é reprodutível
 
@@ -39,10 +39,13 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "src"))
 
+import numpy as np  # noqa: E402
+
 from grafo_societario.graph.artefatos import (  # noqa: E402
     ARTEFATOS_PUBLICAVEIS,
     soma_do_arquivo,
 )
+from grafo_societario.graph.catalogo import TIPOS  # noqa: E402
 
 MANIFESTO = "manifesto.json"
 """Único membro do tar que não é artefato.
@@ -53,6 +56,21 @@ momentos diferentes, e errar essa ligação produz o pior tipo de falha — uma 
 que sobe normalmente servindo a competência errada, sem nada indicar que está
 errada.
 """
+
+
+def pessoas_fisicas_com_nome(origem: Path) -> int:
+    """Quantas pessoas físicas têm nome gravado. No artefato publicável, zero.
+
+    `atributos.npy` guarda o tipo nos dois bits baixos, e `nome_offsets.npy` dá a
+    faixa de bytes de cada nó — faixa vazia quer dizer sem nome. O cruzamento dos
+    dois responde, sem descomprimir nome nenhum, a única pergunta de privacidade
+    que o artefato precisa responder sobre si mesmo.
+    """
+    atributos = np.load(origem / "atributos.npy", mmap_mode="r")
+    offsets = np.load(origem / "nome_offsets.npy", mmap_mode="r")
+    e_pessoa_fisica = (np.asarray(atributos) & 0b11) == TIPOS.index("pessoa_fisica")
+    tem_nome = np.diff(np.asarray(offsets)) > 0
+    return int((e_pessoa_fisica & tem_nome).sum())
 
 
 def _informacao_normalizada(nome: str, tamanho: int) -> tarfile.TarInfo:
@@ -77,6 +95,11 @@ def montar(origem: Path, competencia: str, uf_alvo: str, destino: Path) -> Path:
     manifesto = {
         "competencia": competencia,
         "uf_alvo": uf_alvo,
+        # Fato **medido**, não flag declarada. `EXPOR_PF` é configuração de quem
+        # construiu, e configuração se erra; o que vai a público é o conteúdo.
+        # Zero aqui é o que `EXPOR_PF=false` produz, e o conferidor recalcula o
+        # mesmo número a partir do tar em vez de acreditar neste.
+        "pessoas_fisicas_com_nome": pessoas_fisicas_com_nome(origem),
         "arquivos": {
             nome: {
                 "sha256": soma_do_arquivo(origem / nome),

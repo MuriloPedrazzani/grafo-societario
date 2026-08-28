@@ -47,10 +47,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Sem `pip install`: o conferidor precisa de `ARTEFATOS_PUBLICAVEIS`, e o
-      # módulo que a declara não importa nada além da biblioteca padrão — é
-      # requisito escrito no próprio módulo, e aqui ele vira economia de um passo.
-      - name: Confere que a lista está ao alcance sem instalar nada
+      # Só NumPy: o conferidor lê `atributos.npy` e `nome_offsets.npy` de dentro
+      # do pacote para recalcular quantas pessoas físicas têm nome. É a única
+      # dependência, e ela existe por causa da checagem que não pode ser delegada
+      # ao manifesto.
+      - name: Instala o mínimo para conferir
+        run: pip install --quiet "numpy>=2.0"
+
+      - name: Confere que a lista está ao alcance
         run: PYTHONPATH=src python -c "from grafo_societario.graph.artefatos import ARTEFATOS_PUBLICAVEIS as a; print(len(a), 'artefatos declarados')"
 
       - name: Recusa promover o que já está público
