@@ -43,7 +43,8 @@ from typing import Any, Final
 import numpy as np
 
 from grafo_societario.config import Config
-from grafo_societario.graph.catalogo import CONFIANCAS, ESTIMADA, REGIOES, SEM_REGIAO, TIPOS
+from grafo_societario.graph.artefatos import TIPOS
+from grafo_societario.graph.catalogo import CONFIANCAS, ESTIMADA, REGIOES, SEM_REGIAO
 from grafo_societario.transform.bronze import abrir_conexao
 
 logger = logging.getLogger(__name__)

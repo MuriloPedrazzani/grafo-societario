@@ -294,6 +294,59 @@ def test_o_manifesto_e_o_unico_membro_que_nao_e_artefato(
     assert set(manifesto["arquivos"]) == set(ARTEFATOS_PUBLICAVEIS)
 
 
+def test_artefatos_nao_importa_nada_fora_da_biblioteca_padrao() -> None:
+    """O módulo diz isso no próprio docstring, e nada verificava.
+
+    O portão de publicação instala **só NumPy** — pode, porque `artefatos.py` é
+    stdlib pura e é dele que sai `ARTEFATOS_PUBLICAVEIS`. Quando `TIPOS` foi
+    importado do `catalogo`, veio junto `Config` e o pydantic, e o workflow
+    quebrou na primeira execução real com `ModuleNotFoundError`.
+
+    A regra existia em prosa. Aqui ela vira condição — e o modo de falha que ela
+    previne só aparece em ambiente enxuto, que é justamente onde ninguém testa.
+    """
+    arvore = ast.parse(
+        (RAIZ / "src" / "grafo_societario" / "graph" / "artefatos.py").read_text(encoding="utf-8")
+    )
+
+    externos: set[str] = set()
+    for no in ast.walk(arvore):
+        if isinstance(no, ast.Import):
+            externos.update(alias.name.split(".")[0] for alias in no.names)
+        elif isinstance(no, ast.ImportFrom) and no.module and no.level == 0:
+            externos.add(no.module.split(".")[0])
+
+    fora = sorted(externos - sys.stdlib_module_names)
+    assert not fora, (
+        f"artefatos.py importa {fora}, que não é biblioteca padrão. O portão de "
+        f"publicação instala só NumPy e importa este módulo — cada dependência "
+        f"nova aqui é uma que o CI passa a ter de instalar, ou quebra."
+    )
+
+
+def test_os_dois_TIPOS_do_projeto_nao_se_substituem_em_silencio() -> None:
+    """Há dois `TIPOS` no projeto, com o mesmo nome e formas diferentes.
+
+    `artefatos.TIPOS` é a tupla da ordem em que `atributos.npy` codifica o tipo.
+    `transform.identity.TIPOS` é o mapa do código da Receita (`"1"` para pessoa
+    jurídica). Um import trocado é plausível — o nome é idêntico.
+
+    Isto estava registrado como "falharia alto", que era **previsão**. Aqui vira
+    medição: a substituição levanta `AttributeError` no uso real, que é
+    `TIPOS.index(...)`. Se algum dia as duas formas convergirem, a troca passa a
+    ser silenciosa e este teste é que avisa.
+    """
+    from grafo_societario.graph.artefatos import TIPOS as TIPOS_DO_ARTEFATO
+    from grafo_societario.transform.identity import TIPOS as TIPOS_DA_RECEITA
+
+    assert isinstance(TIPOS_DO_ARTEFATO, tuple)
+    assert isinstance(TIPOS_DA_RECEITA, dict)
+    assert TIPOS_DO_ARTEFATO.index("pessoa_fisica") == 1
+
+    with pytest.raises(AttributeError):
+        TIPOS_DA_RECEITA.index("pessoa_fisica")  # type: ignore[attr-defined]
+
+
 def test_o_workflow_recusa_tag_com_mais_de_uma_release() -> None:
     """Aconteceu na primeira publicação real: três rascunhos com a mesma tag.
 

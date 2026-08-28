@@ -54,8 +54,10 @@ sys.path.insert(0, str(RAIZ / "src"))
 
 import numpy as np  # noqa: E402
 
-from grafo_societario.graph.artefatos import ARTEFATOS_PUBLICAVEIS  # noqa: E402
-from grafo_societario.graph.catalogo import TIPOS  # noqa: E402
+from grafo_societario.graph.artefatos import (  # noqa: E402
+    ARTEFATOS_PUBLICAVEIS,
+    TIPOS,
+)
 
 TAG = re.compile(r"^artefatos-(?P<competencia>\d{4}-\d{2})$")
 BLOCO = 1024 * 1024
