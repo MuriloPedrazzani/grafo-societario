@@ -94,7 +94,12 @@ def test_medir_cronometra_e_devolve_o_resultado() -> None:
 
 def test_acrescimo_nunca_e_negativo() -> None:
     """Etapa que coube no que as anteriores já reservaram custou zero, e não menos
-    que zero — residente que encolhe é a anterior devolvendo, não esta poupando."""
+    que zero — residente que encolhe é a anterior devolvendo, não esta poupando.
+
+    Esta asserção era tautologia enquanto `acrescimo` fazia `max(0, …)`: não havia
+    entrada capaz de reprová-la. Sem a trava, ela passa a testar a medição, que é
+    o que o nome dela sempre prometeu.
+    """
     assert medir("etapa barata", lambda: "nada").acrescimo >= 0
 
 

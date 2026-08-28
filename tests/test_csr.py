@@ -178,10 +178,21 @@ def test_o_medidor_de_memoria_detecta_alocacao_real() -> None:
 
 @pytest.fixture
 def grafo_grande(tmp_path: Path) -> Grafo:
-    """Um CSR de 32 MiB em `indices`: grande o bastante para a diferença entre
-    mapear e carregar ficar acima do ruído de medição."""
-    nos = 1024
-    por_no = 8192
+    """Um CSR de 32 MiB em `indices`, com linha de 8 KiB.
+
+    **A forma importa mais que o tamanho.** Tocar um elemento por linha traz uma
+    página por linha, então o sinal do teste de acesso é o número de linhas, não o
+    tamanho do arquivo. Medido, com o arquivo fixo em 32 MiB:
+
+        linha de 32 KiB (1.024 linhas)  ->  +6,36 MiB
+        linha de  8 KiB (4.096 linhas)  -> +16,02 MiB
+        linha de  4 KiB (8.192 linhas)  -> +32,03 MiB
+
+    A de 4 KiB traz o arquivo inteiro e estoura o limite superior do próprio teste,
+    que é o tamanho do `indices`. A de 8 KiB fica com folga dos dois lados.
+    """
+    nos = 4096
+    por_no = 2048
     posicoes = nos * por_no
     indptr = np.arange(nos + 1, dtype=np.int32) * por_no
     indices = np.tile(np.arange(por_no, dtype=np.int32), nos)
@@ -215,11 +226,28 @@ def test_abrir_nao_carrega_o_arquivo(grafo_grande: Grafo) -> None:
         f"abrir e ler uma linha custou {crescimento / MIB:.1f} MiB sobre um indices de "
         f"{grafo_grande.posicoes * 4 / MIB:.0f} MiB"
     )
-    assert linha.size == 8192
+    # Derivado da fixture, e não copiado dela: um número solto aqui quebra
+    # calado quando a forma muda, e a forma mudou uma vez por causa do sinal de
+    # memória do teste seguinte.
+    assert linha.size == grafo_grande.posicoes // grafo_grande.nos
 
 
-TOQUES: Final = 32
-"""Linhas tocadas no teste de acesso aleatório.
+TOQUES: Final = 4_096
+"""Nós tocados no teste de acesso — todas as linhas da fixture.
+
+Era 32, e o sinal ficava em ~2,5 MiB: pequeno o bastante para o teste sortear
+vermelho na suíte completa, e passar isolado. Subir a constante sozinha não
+resolvia, porque `permutation(nos)[:TOQUES]` satura no número de linhas — medido,
+2.048 e 8.192 traziam os mesmos 4 MiB da fixture antiga.
+
+O que comprou margem foi a **forma** da fixture, não a constante. Ver o docstring
+de `grafo_grande`.
+
+E vale dizer o que isto é e o que não é: a violação fica **improvável**, não
+impossível. A invariante não passa a valer por construção — continua sendo um
+delta de RSS medido ao longo de uma janela, e RSS não é monotônico.
+
+Do docstring original: linhas tocadas no teste de acesso aleatório.
 
 **Quanto chega por falta de página é decisão do sistema, e não deste módulo.**
 Medido: tocar estas 32 linhas de um arquivo de 32 MiB traz 26,4 MiB no Linux e
@@ -256,10 +284,22 @@ def test_a_memoria_chega_no_acesso_e_nao_na_abertura(grafo_grande: Grafo) -> Non
         "acessar tem de trazer página: se a residente não muda, ou o arquivo já veio "
         "inteiro na abertura, ou o medidor não está vendo o mapeamento"
     )
-    assert crescimento <= grafo_grande.posicoes * 4, (
-        f"{crescimento / MIB:.1f} MiB para um indices de "
-        f"{grafo_grande.posicoes * 4 / MIB:.0f} MiB — mais do que o arquivo inteiro não "
-        "pode vir do arquivo"
+    # O teto é o **total mapeado**, não só o `indices`. Tocar uma linha traz
+    # também a página do `indptr` que dá o início dela, e o readahead do Linux
+    # traz o `indices` inteiro quando as linhas são muitas — medido, +32,00 MiB
+    # de um `indices` de exatamente 32 MiB, que estourava um teto de 32 MiB por
+    # alguns kilobytes de `indptr`.
+    #
+    # A afirmação continua a mesma e fica mais exata: não pode vir mais memória
+    # do que existe nos arquivos mapeados.
+    mapeado = (
+        grafo_grande.posicoes * 4  # indices, int32
+        + (grafo_grande.nos + 1) * 4  # indptr, int32
+        + grafo_grande.posicoes  # qualificacoes, int8
+    )
+    assert crescimento <= mapeado, (
+        f"{crescimento / MIB:.1f} MiB para {mapeado / MIB:.1f} MiB de arquivos "
+        f"mapeados — mais do que os arquivos inteiros não pode vir deles"
     )
 
 
