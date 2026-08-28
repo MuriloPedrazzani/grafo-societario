@@ -130,6 +130,7 @@ class Amostrador:
         self.intervalo = intervalo
         self.processo = psutil.Process()
         self.pico = 0
+        self.inicial = 0
         self._parar = threading.Event()
         self._linha: threading.Thread | None = None
 
@@ -139,7 +140,12 @@ class Amostrador:
             self._parar.wait(self.intervalo)
 
     def __enter__(self) -> Amostrador:
-        self.pico = int(self.processo.memory_info().rss)
+        # A residente inicial sai **desta** leitura, e não de outra feita antes.
+        # Duas leituras em instantes diferentes são duas grandezas: o RSS cai
+        # quando o interpretador devolve páginas, e a etapa aparecia consumindo
+        # menos que zero — medido, 186,8 MiB caindo para 66,6 ao liberar.
+        self.inicial = int(self.processo.memory_info().rss)
+        self.pico = self.inicial
         self._parar.clear()
         self._linha = threading.Thread(target=self._amostrar, daemon=True)
         self._linha.start()
@@ -153,15 +159,19 @@ class Amostrador:
 
 
 def medir(nome: str, trabalho: Callable[[], str]) -> Etapa:
-    """Roda uma etapa cronometrada, com o pico amostrado em paralelo."""
-    inicial = int(psutil.Process().memory_info().rss)
+    """Roda uma etapa cronometrada, com o pico amostrado em paralelo.
+
+    A residente inicial vem do próprio amostrador. Lê-la aqui, antes de ele
+    começar, seria uma segunda grandeza: entre as duas leituras o RSS pode cair,
+    e a etapa sairia com pico abaixo do início — que é impossível pela definição
+    de pico, e acontecia."""
     comeco = time.monotonic()
     with Amostrador() as amostrador:
         resultado = trabalho()
     return Etapa(
         nome=nome,
         segundos=time.monotonic() - comeco,
-        residente_inicial=inicial,
+        residente_inicial=amostrador.inicial,
         pico=amostrador.pico,
         resultado=resultado,
     )
