@@ -52,12 +52,12 @@ from typing import Any, Final, Literal
 import numpy as np
 
 from grafo_societario.config import Config
+from grafo_societario.graph.artefatos import TIPOS
 
 logger = logging.getLogger(__name__)
 
 MODO_DE_MAPEAMENTO: Final = "r"
 
-TIPOS: Final = ("pessoa_juridica", "pessoa_fisica", "estrangeiro")
 
 PESSOA_JURIDICA: Final = TIPOS[0]
 """O único tipo cujo nome é público. Os outros dois são nome de gente."""

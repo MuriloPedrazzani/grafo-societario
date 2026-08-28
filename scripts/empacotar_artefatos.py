@@ -43,9 +43,9 @@ import numpy as np  # noqa: E402
 
 from grafo_societario.graph.artefatos import (  # noqa: E402
     ARTEFATOS_PUBLICAVEIS,
+    TIPOS,
     soma_do_arquivo,
 )
-from grafo_societario.graph.catalogo import TIPOS  # noqa: E402
 
 MANIFESTO = "manifesto.json"
 """Único membro do tar que não é artefato.

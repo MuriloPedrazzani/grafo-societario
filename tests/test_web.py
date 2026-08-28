@@ -42,7 +42,7 @@ from grafo_societario.api.main import criar_aplicacao
 from grafo_societario.api.schemas import DesfechoDaConsulta
 from grafo_societario.api.web import ESTATICOS, PAGINA
 from grafo_societario.config import Config
-from grafo_societario.graph.catalogo import TIPOS
+from grafo_societario.graph.artefatos import TIPOS
 from test_caminho import grafo_de_exemplo  # noqa: F401
 
 APP_JS = ESTATICOS / "app.js"

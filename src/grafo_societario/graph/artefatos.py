@@ -17,6 +17,19 @@ from typing import Final
 BLOCO_DE_LEITURA: Final = 1024 * 1024
 """Um MiB por leitura. Medido: 1,5 GB/s sobre os 416 MB do artefato."""
 
+TIPOS: Final = ("pessoa_juridica", "pessoa_fisica", "estrangeiro")
+"""Os tipos de nó, na ordem em que `atributos.npy` os codifica nos dois bits baixos.
+
+Mora aqui, e não no catálogo que os lê, porque é **propriedade do artefato
+publicado** — quem abrir o `.npy` sem este projeto precisa desta ordem para
+interpretá-lo, e quem confere a Release precisa dela sem poder pagar por uma
+árvore de dependências.
+
+Estava no `catalogo`, e importá-lo de lá arrastava `Config` e o pydantic. O
+portão de publicação, que instala só NumPy, quebrou por isso na primeira
+execução real. A regra do topo deste módulo — nada além da biblioteca padrão —
+existe justamente para que ele seja importável de qualquer lugar."""
+
 ARTEFATOS_PUBLICAVEIS: Final = (
     "cnpj_ordenado.npy",
     "no_por_cnpj.npy",

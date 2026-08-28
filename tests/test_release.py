@@ -294,6 +294,36 @@ def test_o_manifesto_e_o_unico_membro_que_nao_e_artefato(
     assert set(manifesto["arquivos"]) == set(ARTEFATOS_PUBLICAVEIS)
 
 
+def test_artefatos_nao_importa_nada_fora_da_biblioteca_padrao() -> None:
+    """O módulo diz isso no próprio docstring, e nada verificava.
+
+    O portão de publicação instala **só NumPy** — pode, porque `artefatos.py` é
+    stdlib pura e é dele que sai `ARTEFATOS_PUBLICAVEIS`. Quando `TIPOS` foi
+    importado do `catalogo`, veio junto `Config` e o pydantic, e o workflow
+    quebrou na primeira execução real com `ModuleNotFoundError`.
+
+    A regra existia em prosa. Aqui ela vira condição — e o modo de falha que ela
+    previne só aparece em ambiente enxuto, que é justamente onde ninguém testa.
+    """
+    arvore = ast.parse(
+        (RAIZ / "src" / "grafo_societario" / "graph" / "artefatos.py").read_text(encoding="utf-8")
+    )
+
+    externos: set[str] = set()
+    for no in ast.walk(arvore):
+        if isinstance(no, ast.Import):
+            externos.update(alias.name.split(".")[0] for alias in no.names)
+        elif isinstance(no, ast.ImportFrom) and no.module and no.level == 0:
+            externos.add(no.module.split(".")[0])
+
+    fora = sorted(externos - sys.stdlib_module_names)
+    assert not fora, (
+        f"artefatos.py importa {fora}, que não é biblioteca padrão. O portão de "
+        f"publicação instala só NumPy e importa este módulo — cada dependência "
+        f"nova aqui é uma que o CI passa a ter de instalar, ou quebra."
+    )
+
+
 def test_o_workflow_recusa_tag_com_mais_de_uma_release() -> None:
     """Aconteceu na primeira publicação real: três rascunhos com a mesma tag.
 
