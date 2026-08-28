@@ -57,6 +57,24 @@ jobs:
       - name: Confere que a lista está ao alcance
         run: PYTHONPATH=src python -c "from grafo_societario.graph.artefatos import ARTEFATOS_PUBLICAVEIS as a; print(len(a), 'artefatos declarados')"
 
+      # Aconteceu na primeira publicação real: três rascunhos com a mesma tag,
+      # idênticos em ativos e alvo. `view`, `download` e `edit` resolvem pela tag,
+      # e com mais de um candidato nada garante que o portão confira um e promova
+      # o mesmo — que é a única coisa que ele promete.
+      - name: Recusa se a tag tiver mais de uma Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          quantas=$(gh api "repos/${{ github.repository }}/releases" --paginate \
+            --jq '[.[] | select(.tag_name == "${{ inputs.tag }}")] | length' | paste -sd+ | bc)
+          echo "Releases com a tag ${{ inputs.tag }}: $quantas"
+          if [ "$quantas" -ne 1 ]; then
+            echo "::error::${{ inputs.tag }} tem $quantas Releases, e o portão só opera com exatamente uma."
+            echo "::error::Com mais de uma, conferir e promover podem cair em objetos diferentes."
+            exit 1
+          fi
+
       - name: Recusa promover o que já está público
         env:
           GH_TOKEN: ${{ github.token }}

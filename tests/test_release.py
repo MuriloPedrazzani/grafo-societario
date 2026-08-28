@@ -294,6 +294,22 @@ def test_o_manifesto_e_o_unico_membro_que_nao_e_artefato(
     assert set(manifesto["arquivos"]) == set(ARTEFATOS_PUBLICAVEIS)
 
 
+def test_o_workflow_recusa_tag_com_mais_de_uma_release() -> None:
+    """Aconteceu na primeira publicação real: três rascunhos com a mesma tag.
+
+    `gh release view`, `download` e `edit` resolvem pela tag. Com mais de um
+    candidato, nada garante que o portão confira um objeto e promova o mesmo — e
+    "confiro o que promovo" é a única coisa que ele promete.
+
+    Os três eram idênticos em ativos e alvo, então nada de ruim teria ido ao ar.
+    A guarda não é sobre o dano daquele caso; é sobre a promessa deixar de valer.
+    """
+    fluxo = (RAIZ / ".github" / "workflows" / "publicar-artefatos.yml").read_text(encoding="utf-8")
+
+    assert "select(.tag_name ==" in fluxo, "o workflow não conta quantas Releases têm a tag"
+    assert "-ne 1" in fluxo, "o workflow precisa exigir exatamente uma"
+
+
 def test_montador_e_conferidor_nao_compartilham_logica() -> None:
     """A precisão que motiva os dois arquivos: se o mesmo código monta e confere,
     a conferência não pega defeito do montador — ela confirma que ele foi
